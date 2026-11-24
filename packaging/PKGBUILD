@@ -1,5 +1,5 @@
 pkgname=fluffify-git
-pkgver=r1.0000000
+pkgver=r1.115dc57
 pkgrel=1
 pkgdesc="TUI-менеджер и трей-клиент для Xray-core"
 arch=('x86_64' 'aarch64')
