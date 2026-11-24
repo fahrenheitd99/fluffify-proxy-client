@@ -1,0 +1,13 @@
+[Unit]
+Description=Fluffify xray-core daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/xray-tui daemon
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

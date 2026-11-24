@@ -1,0 +1,10 @@
+xray-tui
+fluffify
+*.exe
+
+pkg/
+src/
+*.pkg.tar.zst
+*.tar.gz
+
+*.log

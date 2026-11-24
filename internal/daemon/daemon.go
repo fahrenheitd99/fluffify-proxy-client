@@ -1,0 +1,373 @@
+package daemon
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+	"strings"
+
+	"xray-tui/internal/config"
+	"xray-tui/internal/core"
+	"xray-tui/internal/generator"
+	"xray-tui/internal/ipc"
+)
+
+const tempTestConfig = `{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "socks-in",
+      "listen": "127.0.0.1",
+      "port": 10808,
+      "protocol": "socks",
+      "settings": {
+        "udp": true
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    }
+  ]
+}`
+
+type Daemon struct {
+	socketPath string
+	runner     *core.Runner
+
+	mu            sync.Mutex
+	startedAt     time.Time
+	activeProfile string
+	socksAddr     string
+	httpAddr      string
+	mixed         bool
+	proxyAuth     bool
+	mode          string
+	tunName       string
+
+	subsMu sync.RWMutex
+	subs   map[chan string]struct{}
+	stopCh chan struct{}
+}
+
+func New(socketPath, xrayBin string) *Daemon {
+	if socketPath == "" {
+		socketPath = ipc.DefaultSocketPath()
+	}
+
+	d := &Daemon{
+		socketPath: socketPath,
+		subs:       make(map[chan string]struct{}),
+		stopCh:     make(chan struct{}),
+	}
+	d.runner = core.NewRunner(xrayBin, d.broadcastLog)
+	return d
+}
+
+func (d *Daemon) Run(ctx context.Context) error {
+	if err := os.MkdirAll(filepath.Dir(d.socketPath), 0o700); err != nil {
+		return fmt.Errorf("не удалось создать директорию сокета: %w", err)
+	}
+
+	if conn, err := net.DialTimeout("unix", d.socketPath, 300*time.Millisecond); err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("демон уже запущен на %s", d.socketPath)
+	}
+	_ = os.Remove(d.socketPath)
+
+	ln, err := net.Listen("unix", d.socketPath)
+	if err != nil {
+		return fmt.Errorf("не удалось открыть сокет %s: %w", d.socketPath, err)
+	}
+	if err := os.Chmod(d.socketPath, 0o600); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	defer func() {
+		_ = ln.Close()
+		_ = os.Remove(d.socketPath)
+	}()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", d.handleStatus)
+	mux.HandleFunc("POST /start", d.handleStart)
+	mux.HandleFunc("POST /stop", d.handleStop)
+	mux.HandleFunc("GET /logs", d.handleLogs)
+	mux.HandleFunc("GET /logs/stream", d.handleLogsStream)
+
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	fmt.Printf("[daemon] слушает %s\n", d.socketPath)
+	go d.tryAutoConnect()
+
+	select {
+	case <-ctx.Done():
+		fmt.Println("\n[daemon] завершение работы...")
+	case err := <-errCh:
+		return err
+	}
+
+	close(d.stopCh)
+	_ = d.runner.Stop()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+func (d *Daemon) tryAutoConnect() {
+	store, err := config.Load()
+	if err != nil || !store.Settings.AutoConnect {
+		return
+	}
+	prof := store.ActiveProfile()
+	if prof == nil {
+		return
+	}
+
+	res, err := generator.BuildForProfile(store, prof)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[daemon] автоподключение пропущено: %v\n", err)
+		return
+	}
+
+	if err := d.runner.Start(res.Config, res.AssetDir); err != nil {
+		fmt.Fprintf(os.Stderr, "[daemon] ошибка автоподключения: %v\n", err)
+		return
+	}
+
+	d.mu.Lock()
+	d.startedAt = time.Now()
+	d.activeProfile = prof.Name
+	d.socksAddr = res.SocksAddr
+	d.httpAddr = res.HTTPAddr
+	d.mixed = res.Mixed
+	d.proxyAuth = res.ProxyAuth
+	d.mode = store.Settings.Mode
+	d.tunName = store.Settings.TUNInterface
+	d.mu.Unlock()
+
+	fmt.Printf("[daemon] автоподключение: %s (%s)\n", prof.Name, store.Settings.Mode)
+}
+
+func (d *Daemon) broadcastLog(line string) {
+	d.subsMu.RLock()
+	defer d.subsMu.RUnlock()
+
+	for ch := range d.subs {
+		select {
+		case ch <- line:
+		default:
+		}
+	}
+}
+
+func (d *Daemon) statusSnapshot() ipc.StatusResponse {
+	running := d.runner.IsRunning()
+
+	d.mu.Lock()
+	startedAt := d.startedAt
+	profile := d.activeProfile
+	socksAddr := d.socksAddr
+	httpAddr := d.httpAddr
+	mixed := d.mixed
+	proxyAuth := d.proxyAuth
+	mode := d.mode
+	tunName := d.tunName
+	d.mu.Unlock()
+
+	resp := ipc.StatusResponse{Running: running}
+	if running {
+		resp.Profile = profile
+		resp.Mode = mode
+		resp.TUNName = tunName
+		resp.SocksAddr = socksAddr
+		resp.HTTPAddr = httpAddr
+		resp.Mixed = mixed
+		resp.ProxyAuth = proxyAuth
+		resp.StartedAt = startedAt
+		resp.UptimeSec = int64(time.Since(startedAt).Seconds())
+	}
+	return resp
+}
+
+func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, d.statusSnapshot())
+}
+
+func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, ipc.ErrorResponse{Error: "не удалось прочитать запрос"})
+		return
+	}
+
+	var req ipc.StartRequest
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, ipc.ErrorResponse{Error: "невалидный JSON запроса"})
+			return
+		}
+	}
+
+	cfg := bytes.TrimSpace(req.Config)
+	profile := req.Profile
+	socksAddr := req.SocksAddr
+	mode := req.Mode
+	if mode == "" {
+		mode = "proxy"
+	}
+	tunName := req.TUNName
+	if tunName == "" {
+		tunName = "xray0"
+	}
+
+	if len(cfg) == 0 {
+		cfg = []byte(tempTestConfig)
+		if profile == "" {
+			profile = "test-direct"
+		}
+		if socksAddr == "" {
+			socksAddr = "127.0.0.1:10808"
+		}
+	} else if !json.Valid(cfg) {
+		writeJSON(w, http.StatusBadRequest, ipc.ErrorResponse{Error: "передан невалидный JSON конфиг"})
+		return
+	}
+	if socksAddr == "" {
+		socksAddr = "127.0.0.1:10808"
+	}
+
+	if d.runner.IsRunning() {
+		if err := d.runner.Stop(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
+			return
+		}
+	}
+
+	if err := d.runner.Start(cfg, req.AssetDir); err != nil {
+		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: err.Error()})
+		return
+	}
+
+  time.Sleep(250 * time.Millisecond)
+	if !d.runner.IsRunning() {
+		reason := ""
+		logs := d.runner.Logs()
+		for i := len(logs) - 1; i >= 0; i-- {
+			l := strings.TrimSpace(logs[i])
+			if l == "" || strings.HasPrefix(l, "[runner]") {
+				continue
+			}
+			reason = l
+			break
+		}
+
+		errMsg := "xray завершился после старта"
+		if mode == "tun" && (strings.Contains(strings.ToLower(reason), "permission") ||
+			strings.Contains(strings.ToLower(reason), "not permitted") ||
+			strings.Contains(strings.ToLower(reason), "tun")) {
+			errMsg = "TUN не запустился — выполни: xray-tui tun-setup"
+		}
+		if reason != "" {
+			errMsg += ": " + reason
+		}
+		writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: errMsg})
+		return
+	}
+
+	d.mu.Lock()
+	d.startedAt = time.Now()
+	d.activeProfile = profile
+	d.socksAddr = socksAddr
+	d.httpAddr = req.HTTPAddr
+	d.mixed = req.Mixed
+	d.proxyAuth = req.ProxyAuth
+	d.mode = mode
+	d.tunName = tunName
+	d.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, d.statusSnapshot())
+}
+
+func (d *Daemon) handleStop(w http.ResponseWriter, _ *http.Request) {
+	if err := d.runner.Stop(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, d.statusSnapshot())
+}
+
+func (d *Daemon) handleLogs(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, ipc.LogsResponse{Lines: d.runner.Logs()})
+}
+
+func (d *Daemon) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming не поддерживается", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := make(chan string, 128)
+	d.subsMu.Lock()
+	d.subs[ch] = struct{}{}
+	d.subsMu.Unlock()
+
+	defer func() {
+		d.subsMu.Lock()
+		delete(d.subs, ch)
+		d.subsMu.Unlock()
+	}()
+
+	for _, line := range d.runner.Logs() {
+		fmt.Fprintf(w, "data: %s\n\n", line)
+	}
+	flusher.Flush()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-d.stopCh:
+			return
+		case line := <-ch:
+			fmt.Fprintf(w, "data: %s\n\n", line)
+			flusher.Flush()
+		}
+	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}

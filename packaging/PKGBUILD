@@ -1,0 +1,43 @@
+pkgname=fluffify-git
+pkgver=r1.0000000
+pkgrel=1
+pkgdesc="TUI-менеджер и трей-клиент для Xray-core"
+arch=('x86_64' 'aarch64')
+url="https://github.com/fahrenheitd99/fluffify-proxy-client"
+license=('GPL-3.0-or-later')
+depends=('xray' 'glibc' 'gtk3' 'libayatana-appindicator' 'librsvg')
+makedepends=('go' 'git')
+provides=('fluffify' 'xray-tui')
+conflicts=('fluffify' 'xray-tui')
+source=("$pkgname::git+https://github.com/fahrenheitd99/fluffify-proxy-client")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/$pkgname"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  export CGO_ENABLED=1
+  export CGO_CPPFLAGS="${CPPFLAGS}"
+  export CGO_CFLAGS="${CFLAGS}"
+  export CGO_CXXFLAGS="${CXXFLAGS}"
+  export CGO_LDFLAGS="${LDFLAGS}"
+  export GOFLAGS="-buildmode=pie -trimpath -ldflags=-linkmode=external -mod=readonly -modcacherw"
+
+  go build -o xray-tui ./cmd/xray-tui
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+
+  install -Dm755 xray-tui "$pkgdir/usr/bin/xray-tui"
+  ln -s xray-tui "$pkgdir/usr/bin/fluffify"
+
+  install -Dm644 logo/fluffify.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/fluffify.svg"
+  install -Dm644 logo/fluffify-symbolic.svg "$pkgdir/usr/share/icons/hicolor/symbolic/apps/fluffify-symbolic.svg"
+
+  install -Dm644 packaging/fluffify.desktop "$pkgdir/usr/share/applications/fluffify.desktop"
+  install -Dm644 packaging/xray-tui.service "$pkgdir/usr/lib/systemd/user/xray-tui.service"
+}

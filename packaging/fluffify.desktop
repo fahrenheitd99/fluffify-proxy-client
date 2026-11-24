@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Fluffify
+Comment=Fluffify is the crossplatform TUI proxy client based on xray-core
+Exec=xray-tui open
+Icon=fluffify
+Terminal=false
+Categories=Network;Utility;
+Keywords=xray;vless;proxy;vpn;tun;
+StartupNotify=false
