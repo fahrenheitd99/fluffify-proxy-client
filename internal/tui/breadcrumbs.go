@@ -2,8 +2,6 @@ package tui
 
 import (
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
 )
 
 type breadcrumb struct {
@@ -227,7 +225,7 @@ func (m model) layoutBreadcrumbs(w int) ([]string, []crumbBox) {
 
 	for i, c := range crumbs {
 		seg := clipLine(c.label, maxSegW)
-		segW := lipgloss.Width(seg)
+		segW := termWidth(seg)
 
 		if i > 0 {
 			if curX+3+segW <= limitX {
@@ -242,7 +240,7 @@ func (m model) layoutBreadcrumbs(w int) ([]string, []crumbBox) {
 				curX += 2
 				if curX+segW > limitX {
 					seg = clipLine(c.label, maxInt(4, limitX-curX))
-					segW = lipgloss.Width(seg)
+					segW = termWidth(seg)
 				}
 			}
 		}

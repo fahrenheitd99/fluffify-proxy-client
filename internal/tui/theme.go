@@ -712,11 +712,8 @@ func renderGradientBox(rows []string, totalW int, stops [][3]int) string {
 
 	for i, row := range rows {
 		y := i + 1
-		clipped := row
-		if lipgloss.Width(clipped) > innerW {
-			clipped = clipLine(clipped, innerW)
-		}
-		pad := innerW - lipgloss.Width(clipped)
+		clipped := truncateTerm(row, innerW)
+		pad := innerW - termWidth(clipped)
 		if pad < 0 {
 			pad = 0
 		}
@@ -737,6 +734,32 @@ func renderGradientBox(rows []string, totalW int, stops [][3]int) string {
 	return strings.Join(out, "\n")
 }
 
+// renderPlainBox рисует карточку с рамкой вручную, добивая каждую строку до
+// нужной ширины по termWidth. Штатный lipgloss-бокс (.Width) добивает строку
+// до innerW по своей таблице ширины, из-за чего строка с эмодзи выходит за
+// правый край экрана и терминал переносит её на вторую строку.
+func renderPlainBox(rows []string, totalW int, border lipgloss.TerminalColor) string {
+	innerW := totalW - 4
+	if innerW < 10 {
+		innerW = 10
+		totalW = innerW + 4
+	}
+	b := lipgloss.NewStyle().Foreground(border)
+
+	out := make([]string, 0, len(rows)+2)
+	out = append(out, b.Render("╭"+strings.Repeat("─", totalW-2)+"╮"))
+	for _, row := range rows {
+		content := truncateTerm(row, innerW)
+		pad := innerW - termWidth(content)
+		if pad < 0 {
+			pad = 0
+		}
+		out = append(out, b.Render("│")+" "+content+strings.Repeat(" ", pad)+" "+b.Render("│"))
+	}
+	out = append(out, b.Render("╰"+strings.Repeat("─", totalW-2)+"╯"))
+	return strings.Join(out, "\n")
+}
+
 func renderHeaderCard(lines []string, totalW int, state string) string {
 	if gradientEnabled && state != "err" {
 		stops := gradDim
@@ -746,14 +769,14 @@ func renderHeaderCard(lines []string, totalW int, state string) string {
 		return renderGradientBox(lines, totalW, stops)
 	}
 
-	boxStyle := styleHeaderBox.Width(totalW - 2)
+	border := colorBorder
 	switch state {
 	case "on":
-		boxStyle = boxStyle.BorderForeground(colorAccent)
+		border = colorAccent
 	case "err":
-		boxStyle = boxStyle.BorderForeground(colorRed)
+		border = colorRed
 	}
-	return boxStyle.Render(strings.Join(lines, "\n"))
+	return renderPlainBox(lines, totalW, border)
 }
 
 func renderSectionCard(title string, rows []string, totalW int) string {
@@ -763,7 +786,7 @@ func renderSectionCard(title string, rows []string, totalW int) string {
 		return renderGradientBox(all, totalW, gradDim)
 	}
 	content := append([]string{styleTitle.Render(title)}, rows...)
-	return styleSectionBox.Width(totalW - 2).Render(strings.Join(content, "\n"))
+	return renderPlainBox(content, totalW, colorBorder)
 }
 
 func brailleWaveRunes(width, tick int, phaseOffset float64) []rune {
@@ -954,7 +977,7 @@ func renderStatusButton(state string, waving bool, animTick int, revealStep int,
 
 func highlightRow(line string, width int) string {
 	line = clipLine(line, width)
-	if vw := lipgloss.Width(line); vw < width {
+	if vw := termWidth(line); vw < width {
 		line += strings.Repeat(" ", width-vw)
 	}
 	if selReplacer == nil {
@@ -978,8 +1001,7 @@ func applyCanvas(content string, w, h int) string {
 
 	out := make([]string, len(lines))
 	for i, line := range lines {
-		vw := lipgloss.Width(line)
-		if vw < w {
+		if vw := termWidth(line); vw < w {
 			line += strings.Repeat(" ", w-vw)
 		}
 		out[i] = canvasBase + canvasReplacer.Replace(line) + "\x1b[0m"

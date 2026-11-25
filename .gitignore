@@ -8,3 +8,9 @@ src/
 *.tar.gz
 
 *.log
+
+# отладочные материалы и локальные артефакты
+.qwen/
+packaging/fluffify-git/
+package.json
+package-lock.json

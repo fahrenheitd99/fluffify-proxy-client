@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"xray-tui/internal/config"
 	"xray-tui/internal/geo"
@@ -823,14 +822,14 @@ func (m model) renderProfilesList(w, h int) string {
 			geoName = p.Name
 		}
 		right := styleMuted.Render(fmt.Sprintf(" %d прав. · %s", len(rp.Rules), geoName))
-		leftW := lipgloss.Width(prefix) + lipgloss.Width(dot)
-		maxName := maxInt(6, w-leftW-lipgloss.Width(right)-1)
+		leftW := termWidth(prefix) + termWidth(dot)
+		maxName := maxInt(6, w-leftW-termWidth(right)-1)
 
 		name := clipLine(rp.Name, maxName)
 		if selected {
 			name = styleCursorRow.Render(name)
 		}
-		gap := maxInt(0, w-leftW-lipgloss.Width(name)-lipgloss.Width(right))
+		gap := maxInt(0, w-leftW-termWidth(name)-termWidth(right))
 		row := clipLine(prefix+dot+name+strings.Repeat(" ", gap)+right, w)
 		if selected {
 			row = highlightRow(row, w)
@@ -908,7 +907,7 @@ func (m model) renderProfileEdit(w, h int) string {
 		badge := formatOutboundBadge(r.Outbound)
 		summary := summarizeRule(r)
 
-		leftW := lipgloss.Width(prefix) + lipgloss.Width(chk) + lipgloss.Width(badge) + 1
+		leftW := termWidth(prefix) + termWidth(chk) + termWidth(badge) + 1
 		maxText := maxInt(8, w-leftW-1)
 
 		label := r.Name

@@ -710,29 +710,6 @@ func wrapANSI(s string, maxW int) []string {
 	return out
 }
 
-func wrapRunes(runes []rune, width int) []string {
-	if width <= 0 || len(runes) == 0 {
-		return nil
-	}
-	var out []string
-	for len(runes) > 0 {
-		if len(runes) <= width {
-			out = append(out, string(runes))
-			break
-		}
-		cut := width
-		for i := width; i > width/2; i-- {
-			if runes[i-1] == ',' || runes[i-1] == ' ' {
-				cut = i
-				break
-			}
-		}
-		out = append(out, string(runes[:cut]))
-		runes = runes[cut:]
-	}
-	return out
-}
-
 func uiModeLabel(mode string) string {
 	if mode == config.UIModeButtons {
 		return "Мышь / кнопки"

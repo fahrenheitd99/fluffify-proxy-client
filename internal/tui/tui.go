@@ -859,7 +859,7 @@ func (m model) renderSubForm(w, h int) string {
 	boxLines := strings.Split(box, "\n")
 	if len(boxLines) > 2 {
 		hdr, _ := m.layoutSubFormHeader(innerW)
-		pad := maxInt(0, innerW-lipgloss.Width(hdr))
+		pad := maxInt(0, innerW-termWidth(hdr))
 		bdr := lipgloss.NewStyle().Foreground(colorBorder).Render("│")
 		boxLines[1] = bdr + " " + hdr + strings.Repeat(" ", pad) + " " + bdr
 	}
@@ -1438,9 +1438,9 @@ func (m model) renderHeader(w int) string {
 			ulStr = styleMuted.Render("↑ 0 B/s")
 		}
 
-		speedW := maxInt(lipgloss.Width(dlStr), lipgloss.Width(ulStr))
-		dlPadded := dlStr + strings.Repeat(" ", speedW-lipgloss.Width(dlStr))
-		ulPadded := ulStr + strings.Repeat(" ", speedW-lipgloss.Width(ulStr))
+		speedW := maxInt(termWidth(dlStr), termWidth(ulStr))
+		dlPadded := dlStr + strings.Repeat(" ", speedW-termWidth(dlStr))
+		ulPadded := ulStr + strings.Repeat(" ", speedW-termWidth(ulStr))
 
 		speedX := (innerW - speedW) / 2
 		maxSpeedX := innerW - statusButtonW - speedW - 2
@@ -1451,7 +1451,7 @@ func (m model) renderHeader(w int) string {
 			speedX = maxSpeedX
 		}
 
-		needDebugW := maxInt(lipgloss.Width(line2), lipgloss.Width(line3))
+		needDebugW := maxInt(termWidth(line2), termWidth(line3))
 		if needDebugW+2 > speedX && speedX < maxSpeedX {
 			speedX = needDebugW + 2
 			if speedX > maxSpeedX {
@@ -1466,8 +1466,8 @@ func (m model) renderHeader(w int) string {
 		l2 := clipLine(line2, maxDebugW)
 		l3 := clipLine(line3, maxDebugW)
 
-		pad2 := maxInt(1, speedX-lipgloss.Width(l2))
-		pad3 := maxInt(1, speedX-lipgloss.Width(l3))
+		pad2 := maxInt(1, speedX-termWidth(l2))
+		pad3 := maxInt(1, speedX-termWidth(l3))
 
 		botRow1 = l2 + strings.Repeat(" ", pad2) + dlPadded
 		botRow2 = l3 + strings.Repeat(" ", pad3) + ulPadded
@@ -1486,10 +1486,10 @@ func (m model) renderHeader(w int) string {
 	cardLines := make([]string, totalRows)
 	for i := 0; i < totalRows; i++ {
 		l := leftCols[i]
-		lw := lipgloss.Width(l)
+		lw := termWidth(l)
 		if lw > nameMaxW {
 			l = clipLine(l, nameMaxW)
-			lw = lipgloss.Width(l)
+			lw = termWidth(l)
 		}
 		rightPart := emptyBtn
 		if bIdx := i - btnTop; bIdx >= 0 && bIdx < statusButtonH {
@@ -1514,7 +1514,7 @@ func wrapTextByWidth(s string, maxW int) []string {
 	if s == "" || maxW <= 0 {
 		return []string{""}
 	}
-	if lipgloss.Width(s) <= maxW {
+	if termWidth(s) <= maxW {
 		return []string{s}
 	}
 
@@ -1524,7 +1524,7 @@ func wrapTextByWidth(s string, maxW int) []string {
 
 	for _, w := range words {
 		if cur == "" {
-			if lipgloss.Width(w) <= maxW {
+			if termWidth(w) <= maxW {
 				cur = w
 			} else {
 				chunks := splitTokenByWidth(w, maxW)
@@ -1534,11 +1534,11 @@ func wrapTextByWidth(s string, maxW int) []string {
 			continue
 		}
 		cand := cur + " " + w
-		if lipgloss.Width(cand) <= maxW {
+		if termWidth(cand) <= maxW {
 			cur = cand
 		} else {
 			lines = append(lines, cur)
-			if lipgloss.Width(w) <= maxW {
+			if termWidth(w) <= maxW {
 				cur = w
 			} else {
 				chunks := splitTokenByWidth(w, maxW)
@@ -1577,7 +1577,7 @@ func splitTokenByWidth(s string, maxW int) []string {
 	var out []string
 	cur := ""
 	for _, cl := range clusters {
-		if cur != "" && lipgloss.Width(cur+cl) > maxW {
+		if cur != "" && termWidth(cur+cl) > maxW {
 			out = append(out, cur)
 			cur = cl
 		} else {
@@ -1666,8 +1666,8 @@ func (m model) renderServers(w, h int) string {
 			}
 			rightRendered := styleMuted.Render(" " + rightMeta + " ")
 
-			leftFixed := lipgloss.Width(prefix) + lipgloss.Width(arrow)
-			rightW := lipgloss.Width(rightRendered)
+			leftFixed := termWidth(prefix) + termWidth(arrow)
+			rightW := termWidth(rightRendered)
 			titleMax := maxInt(8, w-leftFixed-rightW-3)
 
 			titleText := clipLine(r.title, titleMax)
@@ -1679,7 +1679,7 @@ func (m model) renderServers(w, h int) string {
 				arrow = styleAccent.Render(arrow)
 			}
 
-			fillW := maxInt(1, w-leftFixed-lipgloss.Width(titleText)-rightW)
+			fillW := maxInt(1, w-leftFixed-termWidth(titleText)-rightW)
 			var midFill string
 			if fillW >= 4 {
 				midFill = " " + styleMuted.Render(strings.Repeat("─", fillW-2)) + " "
@@ -1715,8 +1715,8 @@ func (m model) renderServers(w, h int) string {
 			right = " " + formatPing(ps)
 		}
 
-		leftFixed := lipgloss.Width(prefix) + lipgloss.Width(dot) + lipgloss.Width(protoTag)
-		rightW := lipgloss.Width(right)
+		leftFixed := termWidth(prefix) + termWidth(dot) + termWidth(protoTag)
+		rightW := termWidth(right)
 		nameMax := maxInt(8, w-leftFixed-rightW-1)
 
 		nameText := clipLine(p.Name, nameMax)
@@ -1724,7 +1724,7 @@ func (m model) renderServers(w, h int) string {
 			nameText = styleCursorRow.Render(nameText)
 		}
 
-		pad := maxInt(0, w-leftFixed-lipgloss.Width(nameText)-rightW)
+		pad := maxInt(0, w-leftFixed-termWidth(nameText)-rightW)
 		serverLine := clipLine(prefix+dot+protoTag+nameText+strings.Repeat(" ", pad)+right, w)
 		if selected {
 			serverLine = highlightRow(serverLine, w)
@@ -1833,7 +1833,7 @@ func renderSettingRow(label, value string, selected bool, innerW int) string {
 		lbl = styleCursorRow.Render(label)
 		val = styleAccent.Render("[" + value + "]")
 	}
-	gap := innerW - lipgloss.Width(prefix) - lipgloss.Width(lbl) - lipgloss.Width(val)
+	gap := innerW - termWidth(prefix) - termWidth(lbl) - termWidth(val)
 	if gap < 1 {
 		gap = 1
 	}
@@ -1855,7 +1855,7 @@ func (m model) wrappedLogLines(w int) []string {
 		case strings.Contains(raw, "[Warning]"):
 			style = styleYellow
 		}
-		chunks := wrapRunes([]rune(raw), contentW)
+		chunks := wrapTerm(raw, contentW)
 		if len(chunks) == 0 {
 			out = append(out, "")
 			continue
@@ -2129,7 +2129,10 @@ func clipLine(s string, maxW int) string {
 	if maxW <= 0 {
 		return ""
 	}
-	return lipgloss.NewStyle().MaxWidth(maxW).MaxHeight(1).Render(s)
+	// Обрезаем по клеткам терминала (эмодзи = 2 клетки), а не по таблицам
+	// lipgloss: иначе строка, «влезающая» по lipgloss.Width, в реальном
+	// терминале окажется шире экрана и перенесётся на вторую строку.
+	return truncateTerm(s, maxW)
 }
 
 // fitView приводит кадр к ровно h строкам шириной не более w.
