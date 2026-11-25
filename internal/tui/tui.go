@@ -1323,7 +1323,7 @@ func (m model) View() string {
 	b.WriteString("\n")
 	b.WriteString(m.renderFooter(w))
 
-	return applyCanvas(b.String(), m.width, m.height)
+	return fitView(b.String(), m.width, m.height)
 }
 
 func (m model) headerTitleRaw() string {
@@ -1963,9 +1963,6 @@ func (m model) listHeight() int {
 	if m.tab == tabServers && (m.searching || m.filter != "") {
 		reserved++
 	}
-	if m.notice != "" {
-		reserved++
-	}
 	if m.store.Settings.UIMode == config.UIModeButtons {
 		reserved += 2
 	}
@@ -2133,6 +2130,28 @@ func clipLine(s string, maxW int) string {
 		return ""
 	}
 	return lipgloss.NewStyle().MaxWidth(maxW).MaxHeight(1).Render(s)
+}
+
+// fitView приводит кадр к ровно h строкам шириной не более w.
+// Кадр, выходящий за пределы терминала (или строка шире экрана, которую
+// терминал переносит на вторую строку), заставляет altscreen скроллиться —
+// рендерер не может вернуть курсор выше верха экрана, и вся отрисовка
+// начинает «плыть» вверх при прокрутке.
+func fitView(content string, w, h int) string {
+	if w < 1 || h < 1 {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	for i, line := range lines {
+		lines[i] = clipLine(line, w)
+	}
+	return applyCanvas(strings.Join(lines, "\n"), w, h)
 }
 
 func padLines(lines []string, h int) string {
