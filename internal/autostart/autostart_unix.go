@@ -65,6 +65,8 @@ func Set(enable bool) error {
 }
 
 // unitContent — текст user-юнита, запускающего демон из указанного бинарника.
+// AmbientCapabilities даёт демону право создавать TUN-адаптер, не поднимая
+// процесс до root: ядро Xray встроено и создаёт адаптер само.
 func unitContent(exe string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Xray TUI Background Daemon
@@ -72,6 +74,8 @@ After=network-online.target
 
 [Service]
 Type=simple
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 ExecStart=%s daemon
 Restart=on-failure
 RestartSec=2

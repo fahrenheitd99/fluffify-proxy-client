@@ -9,3 +9,9 @@ func TestExeNameUnix(t *testing.T) {
 		t.Fatalf("ExeName(xray) = %q, ждали %q", got, "xray")
 	}
 }
+
+func TestSelfNamePrefersExecutable(t *testing.T) {
+	if got := SelfName(); got == "" {
+		t.Fatal("SelfName не должен быть пустым")
+	}
+}

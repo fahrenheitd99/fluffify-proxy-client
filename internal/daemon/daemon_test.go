@@ -7,13 +7,12 @@ import (
 	"testing"
 )
 
-func TestHandleStartTUNRequiresAdmin(t *testing.T) {
-	old := tunRequiresAdmin
-	tunRequiresAdmin = func() bool { return true }
-	defer func() { tunRequiresAdmin = old }()
+func TestHandleStartTUNWithoutPermission(t *testing.T) {
+	old := hasTunPermission
+	hasTunPermission = func() bool { return false }
+	defer func() { hasTunPermission = old }()
 
-	d := New("/tmp/fluffify-test.sock", "")
-	d.elevated = false
+	d := New("/tmp/fluffify-test.sock")
 
 	req := httptest.NewRequest(http.MethodPost, "/start",
 		strings.NewReader(`{"mode":"tun","config":{"outbounds":[]}}`))
@@ -24,13 +23,13 @@ func TestHandleStartTUNRequiresAdmin(t *testing.T) {
 		t.Fatalf("код ответа %d, ждали %d: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "администратора") || !strings.Contains(body, "restart-admin") {
+	if !strings.Contains(body, "TUN") || !strings.Contains(body, "прав") {
 		t.Fatalf("в ошибке нет подсказки про права: %s", body)
 	}
 }
 
 func TestStatusReportsElevation(t *testing.T) {
-	d := New("/tmp/fluffify-test.sock", "")
+	d := New("/tmp/fluffify-test.sock")
 	d.elevated = true
 	if !d.statusSnapshot().Elevated {
 		t.Fatal("статус должен сообщать о правах администратора")

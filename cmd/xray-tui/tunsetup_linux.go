@@ -3,39 +3,35 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"xray-tui/internal/osutil"
-	"xray-tui/internal/tui"
 )
 
+// runTUNSetup проверяет, что у процесса демона есть права на TUN, и
+// подсказывает, как их выдать. Ядро теперь встроено, поэтому setcap на xray
+// больше не нужен: права должен иметь наш бинарник.
 func runTUNSetup() error {
-	xrayPath, err := exec.LookPath(osutil.ExeName("xray"))
-	if err != nil {
-		return errors.New("бинарник xray не найден в PATH")
-	}
-	resolved, err := filepath.EvalSymlinks(xrayPath)
-	if err == nil {
-		xrayPath = resolved
+	if osutil.HasTunPermission() {
+		fmt.Println("Права на TUN есть (CAP_NET_ADMIN у процесса демона).")
+		return nil
 	}
 
-	fmt.Printf("Выдаю cap_net_admin,cap_net_raw для %s...\n", xrayPath)
-	var cmd *exec.Cmd
-	if _, err := exec.LookPath("pkexec"); err == nil && tui.HasGUI() {
-		cmd = exec.Command("pkexec", "setcap", "cap_net_admin,cap_net_raw+ep", xrayPath)
-	} else {
-		cmd = exec.Command("sudo", "setcap", "cap_net_admin,cap_net_raw+ep", xrayPath)
+	bin := "/usr/bin/xray-tui"
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			bin = resolved
+		}
 	}
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("не удалось выдать права: %w", err)
-	}
-	fmt.Println("Готово. Внешние скрипты и sudoers не нужны — TUN работает напрямую через Xray.")
+
+	fmt.Println("У демона нет прав на TUN. Варианты:")
+	fmt.Println("  1) пакетный юнит systemd (рекомендуется): в нём уже заданы")
+	fmt.Println("     AmbientCapabilities=CAP_NET_ADMIN,CAP_NET_RAW, поэтому достаточно:")
+	fmt.Println("       systemctl --user restart xray-tui.service")
+	fmt.Println("  2) выдать права бинарнику напрямую:")
+	fmt.Printf("       sudo setcap cap_net_admin,cap_net_raw+ep %s\n", bin)
+	fmt.Println("     и перезапустить демон: systemctl --user restart xray-tui.service")
 	return nil
 }

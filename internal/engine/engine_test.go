@@ -51,7 +51,7 @@ func TestEngineStartsInProcess(t *testing.T) {
 		},
 	})
 
-	if err := eng.Start(socksConfig(port, "info")); err != nil {
+	if err := eng.Start(socksConfig(port, "info"), ""); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _ = eng.Stop() }()
@@ -116,10 +116,10 @@ func TestEngineRestartsWithNewConfig(t *testing.T) {
 	portB := freePort(t)
 
 	eng := New(Options{})
-	if err := eng.Start(socksConfig(portA, "warning")); err != nil {
+	if err := eng.Start(socksConfig(portA, "warning"), ""); err != nil {
 		t.Fatalf("первый Start: %v", err)
 	}
-	if err := eng.Start(socksConfig(portB, "warning")); err != nil {
+	if err := eng.Start(socksConfig(portB, "warning"), ""); err != nil {
 		t.Fatalf("второй Start: %v", err)
 	}
 	defer func() { _ = eng.Stop() }()
@@ -139,13 +139,13 @@ func TestEngineRejectsBrokenConfig(t *testing.T) {
 	eng := New(Options{})
 	defer func() { _ = eng.Stop() }()
 
-	if err := eng.Start([]byte("{не json")); err == nil {
+	if err := eng.Start([]byte("{не json"), ""); err == nil {
 		t.Fatal("сломанный конфиг должен возвращать ошибку")
 	}
 	if eng.Running() {
 		t.Fatal("после ошибки движок не должен считаться запущенным")
 	}
-	if err := eng.Start(nil); err == nil {
+	if err := eng.Start(nil, ""); err == nil {
 		t.Fatal("пустой конфиг должен возвращать ошибку")
 	}
 }

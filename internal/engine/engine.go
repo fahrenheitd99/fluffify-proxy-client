@@ -14,10 +14,12 @@ package engine
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"sync"
 
 	applog "github.com/xtls/xray-core/app/log"
 	clog "github.com/xtls/xray-core/common/log"
+	"github.com/xtls/xray-core/common/platform"
 	xcore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf/serial"
 )
@@ -37,15 +39,25 @@ type Engine struct {
 
 // New создаёт движок; ядро стартует только по вызову Start.
 func New(opts Options) *Engine {
-	sink.set(opts.OnLog)
+	// nil не затирает приёмник: временное ядро (например, для замера ping)
+	// не должно отбирать логи у основного инстанса.
+	if opts.OnLog != nil {
+		sink.set(opts.OnLog)
+	}
 	return &Engine{}
 }
 
 // Start поднимает Xray из JSON-конфига в этом процессе. Если ядро уже
 // запущено, предыд��щий инстанс сначала останавливается.
-func (e *Engine) Start(configJSON []byte) error {
+func (e *Engine) Start(configJSON []byte, assetDir string) error {
 	if len(bytes.TrimSpace(configJSON)) == 0 {
 		return fmt.Errorf("пустой конфиг Xray")
+	}
+
+	// Каталог геобаз задаём переменной окружения: ядро живёт в нашем процессе,
+	// а не в отдельном xray.exe, поэтому env ставим себе.
+	if assetDir != "" {
+		_ = os.Setenv(platform.AssetLocation, assetDir)
 	}
 
 	// Снимаем работающий инстанс до создания нового: сокеты и TUN-адаптер

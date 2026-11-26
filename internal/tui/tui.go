@@ -1111,7 +1111,7 @@ func (m model) pingProfileCmd(prof config.Profile, sem chan struct{}) tea.Cmd {
 			}
 		}
 
-		rtt, err := ping.Measure(context.Background(), "", cfg, pingURL)
+		rtt, err := ping.Measure(context.Background(), cfg, pingURL)
 		return pingResultMsg{profileID: prof.ID, rtt: rtt, err: err}
 	}
 }

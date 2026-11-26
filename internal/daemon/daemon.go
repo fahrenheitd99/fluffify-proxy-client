@@ -10,12 +10,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"sync"
 	"time"
 
 	"xray-tui/internal/config"
-	"xray-tui/internal/core"
+	"xray-tui/internal/engine"
 	"xray-tui/internal/generator"
 	"xray-tui/internal/ipc"
 	"xray-tui/internal/osutil"
@@ -44,13 +44,30 @@ const tempTestConfig = `{
   ]
 }`
 
-// tunRequiresAdmin вынесено в переменную, чтобы тесты могли проверить отказ
-// на TUN без прав администратора.
-var tunRequiresAdmin = osutil.TunRequiresAdmin
+// hasTunPermission вынесено в переменную, чтобы тесты могли проверить отказ
+// на TUN, когда у процесса нет прав на создание адаптера.
+var hasTunPermission = osutil.HasTunPermission
+
+// maxDaemonLogLines — ёмкость кольцевого буфера логов демона.
+const maxDaemonLogLines = 500
+
+// tunHint — подсказка пользователю, где взять права на TUN. Текст
+// платформенно-зависимый, но это только строка: системных вызовов нет.
+func tunHint() string {
+	if runtime.GOOS == "windows" {
+		return "запусти приложение от имени администратора (UAC поднимет демон " +
+			"с правами) или выполни: " + osutil.SelfName() + " restart-admin"
+	}
+	return "запусти демон через systemd с AmbientCapabilities=CAP_NET_ADMIN,CAP_NET_RAW " +
+		"или выдай права бинарнику: sudo setcap cap_net_admin,cap_net_raw+ep $(readlink -f $(which fluffify))"
+}
 
 type Daemon struct {
 	socketPath string
-	runner     *core.Runner
+	engine     *engine.Engine
+
+	logMu    sync.Mutex
+	logLines []string
 
 	mu            sync.Mutex
 	startedAt     time.Time
@@ -71,7 +88,7 @@ type Daemon struct {
 	quitOnce sync.Once
 }
 
-func New(socketPath, xrayBin string) *Daemon {
+func New(socketPath string) *Daemon {
 	if socketPath == "" {
 		socketPath = ipc.DefaultSocketPath()
 	}
@@ -83,8 +100,30 @@ func New(socketPath, xrayBin string) *Daemon {
 		quitCh:     make(chan struct{}),
 		elevated:   osutil.IsElevated(),
 	}
-	d.runner = core.NewRunner(xrayBin, d.broadcastLog)
+	d.engine = engine.New(engine.Options{OnLog: d.appendLog})
 	return d
+}
+
+// appendLog складывает строки ядра в кольцевой буфер и рассылает подписчикам:
+// отдельного процесса с pipe больше нет, логи приходят прямо из движка.
+func (d *Daemon) appendLog(line string) {
+	d.logMu.Lock()
+	d.logLines = append(d.logLines, line)
+	if len(d.logLines) > maxDaemonLogLines {
+		d.logLines = d.logLines[len(d.logLines)-maxDaemonLogLines:]
+	}
+	d.logMu.Unlock()
+
+	d.broadcastLog(line)
+}
+
+// logs — снимок буфера логов для /logs и /logs/stream.
+func (d *Daemon) logs() []string {
+	d.logMu.Lock()
+	defer d.logMu.Unlock()
+	out := make([]string, len(d.logLines))
+	copy(out, d.logLines)
+	return out
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -145,7 +184,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 
 	close(d.stopCh)
-	_ = d.runner.Stop()
+	_ = d.engine.Stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -168,7 +207,7 @@ func (d *Daemon) tryAutoConnect() {
 		return
 	}
 
-	if err := d.runner.Start(res.Config, res.AssetDir); err != nil {
+	if err := d.engine.Start(res.Config, res.AssetDir); err != nil {
 		fmt.Fprintf(os.Stderr, "[daemon] ошибка автоподключения: %v\n", err)
 		return
 	}
@@ -200,7 +239,7 @@ func (d *Daemon) broadcastLog(line string) {
 }
 
 func (d *Daemon) statusSnapshot() ipc.StatusResponse {
-	running := d.runner.IsRunning()
+	running := d.engine.Running()
 
 	d.mu.Lock()
 	startedAt := d.startedAt
@@ -259,12 +298,12 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		tunName = "xray0"
 	}
 
-	// В Windows TUN создаёт виртуальный адаптер, а это доступно только
-	// процессу с правами администратора. В Linux права выданы бинарнику xray.
-	if mode == "tun" && tunRequiresAdmin() && !d.elevated {
+	// TUN создаёт само ядро внутри этого процесса: в Windows нужен админ
+	// (демон уже запускается через UAC), в Linux — CAP_NET_ADMIN в юните
+	// systemd либо setcap на наш бинарник.
+	if mode == "tun" && !hasTunPermission() {
 		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: fmt.Sprintf(
-			"TUN требует прав администратора — перезапусти демон командой: %s restart-admin",
-			osutil.SelfName())})
+			"у демона нет прав на TUN — %s", tunHint())})
 		return
 	}
 
@@ -284,41 +323,13 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		socksAddr = "127.0.0.1:10808"
 	}
 
-	if d.runner.IsRunning() {
-		if err := d.runner.Stop(); err != nil {
-			writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
-			return
+	// Старт синхронный: вернувшаяся ошибка уже описывает проблему ядра.
+	if err := d.engine.Start(cfg, req.AssetDir); err != nil {
+		errMsg := err.Error()
+		if mode == "tun" {
+			errMsg += " — " + tunHint()
 		}
-	}
-
-	if err := d.runner.Start(cfg, req.AssetDir); err != nil {
-		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: err.Error()})
-		return
-	}
-
-	time.Sleep(250 * time.Millisecond)
-	if !d.runner.IsRunning() {
-		reason := ""
-		logs := d.runner.Logs()
-		for i := len(logs) - 1; i >= 0; i-- {
-			l := strings.TrimSpace(logs[i])
-			if l == "" || strings.HasPrefix(l, "[runner]") {
-				continue
-			}
-			reason = l
-			break
-		}
-
-		errMsg := "xray завершился после старта"
-		if mode == "tun" && (strings.Contains(strings.ToLower(reason), "permission") ||
-			strings.Contains(strings.ToLower(reason), "not permitted") ||
-			strings.Contains(strings.ToLower(reason), "tun")) {
-			errMsg = "TUN не запустился — выполни: xray-tui tun-setup"
-		}
-		if reason != "" {
-			errMsg += ": " + reason
-		}
-		writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: errMsg})
+		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: errMsg})
 		return
 	}
 
@@ -337,7 +348,7 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleStop(w http.ResponseWriter, _ *http.Request) {
-	if err := d.runner.Stop(); err != nil {
+	if err := d.engine.Stop(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
 		return
 	}
@@ -355,7 +366,7 @@ func (d *Daemon) handleQuit(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (d *Daemon) handleLogs(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, ipc.LogsResponse{Lines: d.runner.Logs()})
+	writeJSON(w, http.StatusOK, ipc.LogsResponse{Lines: d.logs()})
 }
 
 func (d *Daemon) handleLogsStream(w http.ResponseWriter, r *http.Request) {
@@ -380,7 +391,7 @@ func (d *Daemon) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 		d.subsMu.Unlock()
 	}()
 
-	for _, line := range d.runner.Logs() {
+	for _, line := range d.logs() {
 		fmt.Fprintf(w, "data: %s\n\n", line)
 	}
 	flusher.Flush()

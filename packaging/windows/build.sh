@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Собирает Fluffify.exe со значком и версией и упаковывает готовый к раздаче
-# архив вместе с ядром Xray.
+# архив. Ядро Xray встроено в бинарник (github.com/xtls/xray-core), поэтому
+# xray.exe в архиве больше не нужен; wintun.dll остаётся — его грузит ядро
+# для TUN-режима.
 # Геобазы (geoip.dat/geosite.dat) в архив не попадают: клиент качает их сам,
 # когда нужны правила роутинга по доменам/странам.
 # Требуется llvm-windres (пакет llvm) и Go.
@@ -14,8 +16,8 @@ if ! command -v llvm-windres >/dev/null 2>&1; then
 	exit 1
 fi
 
-# Ядро и его лицензии кладём в packaging/windows из Xray-windows-64.zip.
-core=(xray.exe wintun.dll LICENSE-Xray LICENSE-Wintun README-Xray.md Xray-version.txt)
+# Лицензии и wintun.dll кладём в packaging/windows из Xray-windows-64.zip.
+core=(wintun.dll LICENSE-Xray LICENSE-Wintun README-Xray.md Xray-version.txt)
 missing=0
 for f in "${core[@]}"; do
 	if [ ! -f "packaging/windows/$f" ]; then

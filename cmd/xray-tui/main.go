@@ -54,7 +54,7 @@ func run(cmd string, args []string) error {
 	case "daemon":
 		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 		defer stop()
-		return daemon.New(sock, "").Run(ctx)
+		return daemon.New(sock).Run(ctx)
 
 	case "daemon-hidden":
 		// Тот же демон, но сразу прячет своё окно консоли: так его запускает
@@ -62,7 +62,7 @@ func run(cmd string, args []string) error {
 		osutil.HideConsoleIfOwned()
 		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 		defer stop()
-		return daemon.New(sock, "").Run(ctx)
+		return daemon.New(sock).Run(ctx)
 
 	case "up", "start":
 		return runUp(sock, args)
@@ -319,7 +319,7 @@ func measureProfilePing(store *config.Store, prof *config.Profile) (time.Duratio
 			return 0, err
 		}
 	}
-	return ping.Measure(context.Background(), "", cfg, store.Settings.PingURL)
+	return ping.Measure(context.Background(), cfg, store.Settings.PingURL)
 }
 
 func runAdd(args []string) error {
