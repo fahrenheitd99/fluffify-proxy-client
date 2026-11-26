@@ -147,8 +147,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.handleMouseRouting(msg.X, relY, bodyH, msg.Button, isDouble)
 		}
 		return m.handleMouseSettings(w, relY, bodyH, msg.Button, isDouble)
-	case tabAbout:
-		return m, nil
 	}
 
 	return m, nil
@@ -169,15 +167,6 @@ func (m model) handleMouseWheel(dir int) (tea.Model, tea.Cmd) {
 			m.cursor = len(rows) - 1
 		}
 		m.clampTreeScroll()
-
-	case tabAbout:
-		m.aboutScroll += dir * 3
-		if maxOff := m.maxAboutOffset(); m.aboutScroll > maxOff {
-			m.aboutScroll = maxOff
-		}
-		if m.aboutScroll < 0 {
-			m.aboutScroll = 0
-		}
 
 	case tabSubs:
 		n := len(m.store.Subscriptions)
@@ -466,22 +455,20 @@ func (m model) handleMouseRouting(x, relY, bodyH int, btn tea.MouseButton, isDou
 }
 
 func (m model) tabIndexAt(w, x int) int {
-	var labels [5]string
+	var labels [4]string
 	if w < 58 {
-		labels = [5]string{
+		labels = [4]string{
 			fmt.Sprintf("1:Серв(%d)", len(m.store.Profiles)),
 			fmt.Sprintf("2:Подп(%d)", len(m.store.Subscriptions)),
 			"3:Настр",
 			"4:Логи",
-			"5:О прог",
 		}
 	} else {
-		labels = [5]string{
+		labels = [4]string{
 			fmt.Sprintf("[1] Сервера (%d)", len(m.store.Profiles)),
 			fmt.Sprintf("[2] Подписки (%d)", len(m.store.Subscriptions)),
 			"[3] Настройки",
 			"[4] Логи",
-			"[5] О программе",
 		}
 	}
 

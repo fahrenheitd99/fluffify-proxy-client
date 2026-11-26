@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"xray-tui/internal/about"
 	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
 	"xray-tui/internal/osutil"
@@ -39,7 +40,7 @@ type settingsFormState struct {
 	pass        string
 }
 
-const totalSettingsItems = 20
+const totalSettingsItems = 21
 
 func (m model) inSettingsForm() bool {
 	return m.settingsForm.kind != sFormNone
@@ -219,6 +220,19 @@ func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.store.Save()
 			m.notice = "Интерфейс: " + uiModeLabel(m.store.Settings.UIMode)
 			m.noticeErr = false
+
+		case 20: // О приложении / лицензии — открываем текст лицензий из системы
+			if isAction {
+				path, err := about.OpenLicenseFile()
+				if err != nil {
+					m.notice = "Не удалось открыть лицензии: " + err.Error()
+					m.noticeErr = true
+					return m, nil
+				}
+				m.notice = "Лицензии сохранены в " + path + " и открыты"
+				m.noticeErr = false
+				return m, nil
+			}
 		}
 	}
 
@@ -457,6 +471,7 @@ func (m model) renderSettings(w, h int) string {
 		renderSettingRow("HWID", clipLine(m.store.Settings.HWID, 14), m.settingsCursor == 17, innerW),
 		renderSettingRow("User-Agent", clipLine(m.store.Settings.DefaultUA, 16), m.settingsCursor == 18, innerW),
 		renderSettingRow("Интерфейс", uiModeLabel(m.store.Settings.UIMode), m.settingsCursor == 19, innerW),
+		renderSettingRow("О приложении / лицензии", "открыть →", m.settingsCursor == 20, innerW),
 	}
 
 	xrayLines := strings.Split(renderBox("Настройки Xray", xrayRows, w), "\n")

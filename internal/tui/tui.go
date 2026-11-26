@@ -10,9 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	xcore "github.com/xtls/xray-core/core"
 
-	"xray-tui/internal/about"
 	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
 	"xray-tui/internal/daemon"
@@ -31,7 +29,6 @@ const (
 	tabSubs
 	tabSettings
 	tabLogs
-	tabAbout
 )
 
 const localGroupID = "__local__"
@@ -86,6 +83,8 @@ type actionDoneMsg struct {
 	profileID string
 	notice    string
 	err       error
+	// profile — профиль, который подключали (нужен для авто-починки TUN).
+	profile *config.Profile
 }
 
 type pingResultMsg struct {
@@ -163,7 +162,6 @@ type model struct {
 	// Вкладка Логи
 	logs          []string
 	logOffset     int
-	aboutScroll   int // прокрутка вкладки «О программе»
 	logAutoScroll bool
 	logCh         chan string
 
@@ -312,6 +310,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hideStep = 0
 			m.notice = msg.err.Error()
 			m.noticeErr = true
+
+			// Демон запущен без прав: молча чиним — UAC на перезапуск демона
+			// и повторное подключение того же профиля, без трей-манипуляций.
+			if msg.profile != nil && strings.Contains(msg.err.Error(), "нет прав на TUN") {
+				pending := *msg.profile
+				m.pendingConnect = &pending
+				m.busy = true
+				return m, elevateDaemonCmd(m.sock)
+			}
 		} else {
 			m.daemonErr = ""
 			if msg.status != nil {
@@ -483,16 +490,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "5":
-		m.tab = tabAbout
 		return m, nil
 	case "tab":
-		m.tab = (m.tab + 1) % 5
+		m.tab = (m.tab + 1) % 4
 		if m.tab == tabLogs && m.logAutoScroll {
 			m.scrollLogsToBottom()
 		}
 		return m, nil
 	case "shift+tab":
-		m.tab = (m.tab + 4) % 5
+		m.tab = (m.tab + 3) % 4
 		return m, nil
 	}
 
@@ -509,8 +515,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSettingsKey(msg)
 	case tabLogs:
 		return m.handleLogsKey(key)
-	case tabAbout:
-		return m.handleAboutKey(key)
 	}
 
 	return m, nil
@@ -920,76 +924,6 @@ func (m model) handleLogsKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleAboutKey — прокрутка экрана «О программе».
-func (m model) handleAboutKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case "up", "k":
-		m.aboutScroll--
-	case "down", "j":
-		m.aboutScroll++
-	case "pgup":
-		m.aboutScroll -= 12
-	case "pgdown":
-		m.aboutScroll += 12
-	case "g", "home":
-		m.aboutScroll = 0
-	case "G", "end":
-		m.aboutScroll = m.maxAboutOffset()
-	}
-	if m.aboutScroll < 0 {
-		m.aboutScroll = 0
-	}
-	if maxOff := m.maxAboutOffset(); m.aboutScroll > maxOff {
-		m.aboutScroll = maxOff
-	}
-	return m, nil
-}
-
-func (m model) maxAboutOffset() int {
-	w := m.width
-	if w < 38 {
-		w = 38
-	}
-	lines := wrapTextByWidth(m.aboutText(), w-2)
-	maxOff := len(lines) - m.listHeight()
-	if maxOff < 0 {
-		return 0
-	}
-	return maxOff
-}
-
-func (m model) renderAbout(w, h int) string {
-	lines := wrapTextByWidth(m.aboutText(), w-2)
-	start := m.aboutScroll
-	if start < 0 {
-		start = 0
-	}
-	maxOff := len(lines) - h
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	if start > maxOff {
-		start = maxOff
-	}
-	end := start + h
-	if end > len(lines) {
-		end = len(lines)
-	}
-	return padLines(lines[start:end], h)
-}
-
-func (m model) aboutText() string {
-	var b strings.Builder
-	b.WriteString("Fluffify — кроссплатформенный клиент Xray\n")
-	b.WriteString(fmt.Sprintf("Ядро: Xray-core %s\n", xcore.Version()))
-	b.WriteString("Лицензия приложения: GPL-3.0-or-later\n")
-	for _, entry := range about.Entries() {
-		b.WriteString("\n=== " + entry.Name + " ===\n")
-		b.WriteString(entry.Text)
-		b.WriteString("\n")
-	}
-	return b.String()
-}
 func (m model) toggleConnection() (tea.Model, tea.Cmd) {
 	if m.busy {
 		return m, nil
@@ -1476,8 +1410,6 @@ func (m model) View() string {
 			}
 		case tabLogs:
 			b.WriteString(m.renderLogs(w, bodyHeight))
-		case tabAbout:
-			b.WriteString(m.renderAbout(w, bodyHeight))
 		}
 	}
 
@@ -1751,26 +1683,24 @@ func splitTokenByWidth(s string, maxW int) []string {
 }
 
 func (m model) renderTabs(w int) string {
-	var labels [5]string
+	var labels [4]string
 	if w < 58 {
-		labels = [5]string{
+		labels = [4]string{
 			fmt.Sprintf("1:Серв(%d)", len(m.store.Profiles)),
 			fmt.Sprintf("2:Подп(%d)", len(m.store.Subscriptions)),
 			"3:Настр",
 			"4:Логи",
-			"5:О прог",
 		}
 	} else {
-		labels = [5]string{
+		labels = [4]string{
 			fmt.Sprintf("[1] Сервера (%d)", len(m.store.Profiles)),
 			fmt.Sprintf("[2] Подписки (%d)", len(m.store.Subscriptions)),
 			"[3] Настройки",
 			"[4] Логи",
-			"[5] О программе",
 		}
 	}
 
-	parts := make([]string, 5)
+	parts := make([]string, 4)
 	for i, lbl := range labels {
 		if tabID(i) == m.tab {
 			parts[i] = renderTabActive(lbl)
