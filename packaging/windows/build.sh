@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Собирает Fluffify.exe со значком и версией и упаковывает готовый к раздаче
-# архив. Ядро Xray встроено в бинарник (github.com/xtls/xray-core), поэтому
-# xray.exe в архиве больше не нужен; wintun.dll остаётся на виду — его грузит
-# ядро для TUN-режима (и запасная копия встроена в exe).
+# архив. Ядро Xray и драйвер TUN (wintun.dll) встроены в бинарник
+# (github.com/xtls/xray-core + go:embed в internal/osutil/assets), поэтому
+# xray.exe и wintun.dll в архиве больше не нужны: exe сам извлекает драйвер.
 # Геобазы (geoip.dat/geosite.dat) в архив не попадают: клиент качает их сам,
 # когда нужны правила роутинга по доменам/странам.
 # Требуется llvm-windres (пакет llvm), Go и python3.
@@ -22,7 +22,9 @@ fi
 
 # Лицензии и документацию берём из packaging/windows (распакованы из
 # Xray-windows-64.zip) и складываем в архив в папку docs/.
-core=(wintun.dll LICENSE-Xray LICENSE-Wintun README-Xray.md Xray-version.txt)
+# Встроенная копия драйвера живёт в internal/osutil/assets/wintun.dll —
+# при обновлении Xray-windows-64.zip обнови и её (cp поверх, потом коммит).
+core=(LICENSE-Xray LICENSE-Wintun README-Xray.md Xray-version.txt)
 missing=0
 for f in "${core[@]}"; do
 	if [ ! -f "packaging/windows/$f" ]; then
@@ -44,13 +46,13 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 rm -f packaging/windows/xray-tui.exe
 rm -f packaging/windows/geoip.dat packaging/windows/geosite.dat
 
-# Верхний уровень архива — только exe и wintun.dll, весь текст идёт в docs/.
+# Верхний уровень архива — только exe, весь текст идёт в docs/.
 python3 - <<'PY'
 import pathlib, zipfile
 
 base = pathlib.Path("packaging/windows")
 target = base / "fluffify-windows-amd64.zip"
-top = ["Fluffify.exe", "wintun.dll"]
+top = ["Fluffify.exe"]
 docs = ["README-RU.md", "LICENSE-Xray", "LICENSE-Wintun", "README-Xray.md", "Xray-version.txt"]
 
 for name in top + docs:

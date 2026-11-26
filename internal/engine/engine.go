@@ -22,6 +22,8 @@ import (
 	"github.com/xtls/xray-core/common/platform"
 	xcore "github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/infra/conf/serial"
+
+	"xray-tui/internal/osutil"
 )
 
 // Options — настройки движка.
@@ -59,6 +61,10 @@ func (e *Engine) Start(configJSON []byte, assetDir string) error {
 	if assetDir != "" {
 		_ = os.Setenv(platform.AssetLocation, assetDir)
 	}
+
+	// Перед созданием ядра готовим окружение: в Windows драйвер TUN
+	// (wintun.dll) извлекается/предзагружается, если его нет рядом с exe.
+	osutil.EnsureWintunDLL()
 
 	// Снимаем работающий инстанс до создания нового: сокеты и TUN-адаптер
 	// должны освободиться, иначе займём те же порты дважды.
