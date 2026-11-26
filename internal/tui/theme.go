@@ -17,7 +17,7 @@ const (
 )
 
 var (
-themeOrder = []string{
+	themeOrder = []string{
 		config.ThemeSystem,
 		config.ThemeDefaultDark,
 		config.ThemeDefaultLight,

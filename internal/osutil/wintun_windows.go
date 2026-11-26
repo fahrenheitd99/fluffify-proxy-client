@@ -17,59 +17,61 @@ var wintunDLL []byte
 // модуль должен остаться загруженным, чтобы wintun нашёл его у себя.
 var wintunModule windows.Handle
 
-// EnsureWintunDLL гарантирует, что wintun.dll загрузится в процессе:
-// ядро Xray ищет её через LoadLibraryEx только в каталоге exe и в System32,
-// поэтому exe, «вытащенный из папки» без предзагрузки, TUN не поднял бы.
+// EnsureWintunDLL гарантирует, что драйвер TUN (wintun.dll) загрузится в
+// процессе, где бы ни лежал exe:
 //
-// Порядок:
-//  1. wintun.dll лежит рядом с exe — найдётся сама;
-//  2. иначе извлекаем встроенную копию рядом с exe (0644);
-//  3. каталог exe недоступен для записи (Program Files) — извлекаем в
-//     каталог пользователя (%LocalAppData%\xray-tui\wintun.dll) и
-//     предзагружаем по абсолютному пути: модуль с именем wintun.dll
-//     окажется в процессе, и LoadLibraryEx у wintun вернёт уже
-//     загруженную копию (SetDllDirectory/AddDllDirectory тут не работают —
-//     wintun использует LOAD_LIBRARY_SEARCH_*-флаги).
+//  1. dll рядом с exe — найдётся через LOAD_LIBRARY_SEARCH_APPLICATION_DIR;
+//  2. иначе извлекаем встроенную копию в скрытую папку пользователя
+//     %LocalAppData%\Fluffify\wintun.dll (0755/0644) — не сорим рядом с exe;
+//  3. сообщаем Windows, где искать: AddDllDirectory добавляет папку в
+//     поиск, SetDllDirectory задаёт её для устаревшего порядка, а главный
+//     механизм — предзагрузка по абсолютному пути: модуль с именем
+//     wintun.dll остаётся в процессе, и LoadLibraryEx у wintun вернёт
+//     уже загруженную копию.
 //
-// Из каталога exe файл на выходе не удаляем: при следующем запуске он
-// уже на месте и никуда не девается.
+// Извлечённый файл не удаляется на выходе: он переиспользуется при
+// следующих запусках.
 func EnsureWintunDLL() {
 	exe, err := os.Executable()
 	if err != nil {
 		return
 	}
-	exeDir := filepath.Dir(exe)
-	target := filepath.Join(exeDir, "wintun.dll")
 
-	if _, err := os.Stat(target); err == nil {
-		return // лежит рядом — найдётся через APPLICATION_DIR
-	}
-
-	// 2. Пробуем извлечь рядом с exe.
-	if err := os.WriteFile(target, wintunDLL, 0o644); err == nil {
+	// 1. Рядом с exe уже есть — wintun найдёт её сам.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(exe), "wintun.dll")); err == nil {
 		return
 	}
 
-	// 3. Каталог exe только для чтения — кэш пользователя и предзагрузка.
-	cache, err := os.UserCacheDir()
+	// 2. Скрытая папка пользователя: %LocalAppData%\Fluffify
+	cache, err := os.UserCacheDir() // Windows: %LocalAppData%
 	if err != nil {
 		return
 	}
-	cachePath := filepath.Join(cache, "xray-tui", "wintun.dll")
+	dir := filepath.Join(cache, "Fluffify")
+	target := filepath.Join(dir, "wintun.dll")
 
-	if info, err := os.Stat(cachePath); err != nil || info.Size() != int64(len(wintunDLL)) {
-		if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+	if info, err := os.Stat(target); err != nil || info.Size() != int64(len(wintunDLL)) {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return
 		}
-		if err := os.WriteFile(cachePath, wintunDLL, 0o644); err != nil {
+		if err := os.WriteFile(target, wintunDLL, 0o644); err != nil {
 			return
 		}
 	}
 
-	// Предзагрузка по абсолютному пути: имя модуля «wintun.dll» попадает в
-	// список загруженных, поэтому LoadLibraryEx("wintun.dll", …) у wintun
-	// вернёт эту копию. Хендл не освобождаем.
-	if handle, err := windows.LoadLibrary(cachePath); err == nil {
+	// 3. Сообщаем Windows, где искать драйвер.
+	if ptr, err := windows.UTF16PtrFromString(dir); err == nil {
+		// AddDllDirectory — современный способ (список каталогов);
+		// SetDllDirectory задаёт единственный каталог устаревшего порядка.
+		if _, err := windows.AddDllDirectory(ptr); err != nil {
+			_ = windows.SetDllDirectory(dir)
+		}
+	}
+
+	// Предзагрузка по абсолютному пути: модуль «wintun.dll» остаётся в
+	// процессе, и LoadLibraryEx у wintun вернёт эту копию. Хендл не
+	// освобождаем.
+	if handle, err := windows.LoadLibrary(target); err == nil {
 		wintunModule = handle
 	}
 }

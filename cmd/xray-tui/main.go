@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"xray-tui/internal/about"
 	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
 	"xray-tui/internal/daemon"
@@ -28,6 +29,8 @@ import (
 	"xray-tui/internal/ping"
 	"xray-tui/internal/tray"
 	"xray-tui/internal/tui"
+
+	xcore "github.com/xtls/xray-core/core"
 )
 
 func main() {
@@ -149,6 +152,9 @@ func run(cmd string, args []string) error {
 
 	case "sub":
 		return runSub(args)
+
+	case "licenses":
+		return runLicenses()
 
 	case "hwid":
 		return runHWID(args)
@@ -741,6 +747,13 @@ func runHWID(args []string) error {
 		return err
 	}
 	fmt.Printf("Новый HWID сохранён: %s\n", store.Settings.HWID)
+	return nil
+}
+
+func runLicenses() error {
+	fmt.Println("Fluffify — лицензия приложения GPL-3.0-or-later")
+	fmt.Printf("Ядро: Xray-core %s (встроено в бинарник)\n\n", xcore.Version())
+	fmt.Println(about.Combined())
 	return nil
 }
 
