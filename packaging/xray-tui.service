@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Ядро Xray встроено в бинарник и создаёт TUN-адаптер само (inbound "tun"),
-# поэтому фоновому демону нужны сетевые права — достаточно их у юнита.
+# Демон запускает ядро xray child-процессом: через AmbientCapabilities юнита
+# ребёнок наследует сетевые права и создаёт TUN-адаптер без root.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 ExecStart=/usr/bin/xray-tui daemon
