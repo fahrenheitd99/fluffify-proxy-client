@@ -1,15 +1,41 @@
+# Fluffify — сборка пакета для Arch Linux.
+#
+# Собирать так:  makepkg -f -C      (-C выбрасывает рабочую копию из src/)
+#
+# Почему важен -C: makepkg переиспользует рабочую копию из src/, а она помнит
+# абсолютный путь к тому репозиторию, из которого её когда-то создали. Если
+# проект перенесли в другой каталог, fetch идёт из старого места — и makepkg
+# молча собирает устаревший код.
+#
+# Ещё вариант — собирать вне репозитория:
+#   cp packaging/PKGBUILD /tmp/fluffify && cd /tmp/fluffify && makepkg -si
+# Тогда src/, pkg/ и голый клон не появляются в дереве проекта.
+#
+# makepkg держит состояние рядом с этим файлом (src/, pkg/ и голый клон
+# fluffify-git/) — всё перечислено в корневом .gitignore.
+
 pkgname=fluffify-git
-pkgver=r5.63d7d00
+pkgver=r7.a131d43
 pkgrel=1
 pkgdesc="TUI-менеджер и трей-клиент для Xray-core"
 arch=('x86_64' 'aarch64')
 url="https://github.com/fahrenheitd99/fluffify-proxy-client"
 license=('GPL-3.0-or-later')
-depends=('xray' 'glibc' 'gtk3' 'libayatana-appindicator' 'librsvg')
+# xray — само ядро (клиент ищет xray/exe в PATH или рядом с собой),
+# librsvg даёт rsvg-convert для отрисовки символической иконки трея
+# (без него клиент использует встроенную PNG-заглушку).
+# GTK и libappindicator не нужны: трей в Linux работает через DBus
+# (org.kde.StatusNotifierItem + com.canonical.dbusmenu), чистый Go.
+depends=('xray' 'librsvg')
 makedepends=('go' 'git')
 provides=('fluffify' 'xray-tui')
 conflicts=('fluffify' 'xray-tui')
-source=("$pkgname::git+https://github.com/fahrenheitd99/fluffify-proxy-client")
+# LTO отключён осознанно: Go линкует cgo-часть (на Linux это только
+# сопутствующие пакеты) внеш��им линкером, и глобальный lto из makepkg.conf
+# делает такие сборки хрупкими. Сейчас cgo в проекте включается только
+# ради Windows-ресурсов, но флаг оставлен как страховка для сборок с CGO_ENABLED=1.
+options=('!lto')
+source=("$pkgname::git+https://github.com/fahrenheitd99/fluffify-proxy-client#branch=main")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -35,6 +61,7 @@ package() {
   install -Dm755 xray-tui "$pkgdir/usr/bin/xray-tui"
   ln -s xray-tui "$pkgdir/usr/bin/fluffify"
 
+  # Клиент ищет символическую иконку именно в /usr/share/icons/hicolor/symbolic/apps.
   install -Dm644 logo/fluffify.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/fluffify.svg"
   install -Dm644 logo/fluffify-symbolic.svg "$pkgdir/usr/share/icons/hicolor/symbolic/apps/fluffify-symbolic.svg"
 
