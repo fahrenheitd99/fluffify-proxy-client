@@ -20,6 +20,7 @@ packaging/windows/*.zip
 # отладочные материалы и локальные артефакты
 .qwen/
 .fordebug/
+reference-tun/
 packaging/fluffify-git/
 package.json
 package-lock.json

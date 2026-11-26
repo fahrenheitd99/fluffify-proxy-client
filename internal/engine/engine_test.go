@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-
 	"net"
 	"strings"
 	"sync"
@@ -63,7 +62,7 @@ func TestEngineStartsInProcess(t *testing.T) {
 	// SOCKS5-приветствие доказывает, что инбаунд реально работает в процессе.
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
-		t.Fatalf("��нбаунд не слушает %s: %v", addr, err)
+		t.Fatalf("инбаунд не слушает %s: %v", addr, err)
 	}
 	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
 		t.Fatalf("не удалось отправить SOCKS-приветствие: %v", err)
@@ -147,5 +146,14 @@ func TestEngineRejectsBrokenConfig(t *testing.T) {
 	}
 	if err := eng.Start(nil, ""); err == nil {
 		t.Fatal("пустой конфиг должен возвращать ошибку")
+	}
+}
+
+func TestHasTunInbound(t *testing.T) {
+	if !hasTunInbound([]byte(`{"inbounds":[{"protocol":"tun"}]}`)) {
+		t.Fatal("TUN-конфиг должен распознаваться")
+	}
+	if hasTunInbound([]byte(`{"inbounds":[{"protocol":"socks"}]}`)) {
+		t.Fatal("конфиг без TUN не должен распознаваться как TUN")
 	}
 }

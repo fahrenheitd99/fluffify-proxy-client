@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	applog "github.com/xtls/xray-core/app/log"
 	clog "github.com/xtls/xray-core/common/log"
@@ -83,24 +84,63 @@ func (e *Engine) Start(configJSON []byte, assetDir string) error {
 	// остановлено, предупреждение уходит в лог.
 	_ = e.Stop()
 
-	cfg, err := serial.LoadJSONConfig(bytes.NewReader(configJSON))
-	if err != nil {
-		return fmt.Errorf("разбор конфига Xray: %w", err)
+	// Создание ядра. Для TUN-конфигов — с повторными попытками: драйвер
+	// Windows (wintun) освобождается асинхронно после остановки предыдущего
+	// ядра, и мгновенное повторное создание адаптера падает с системной
+	// ошибкой 1247 («initialization operation…»). В старой child-process
+	// схеме между запусками проходили секунды — теперь паузы внутри движка.
+	attempts := 1
+	if hasTunInbound(configJSON) {
+		attempts = 3
 	}
 
-	instance, err := xcore.New(cfg)
-	if err != nil {
-		return fmt.Errorf("создание ядра: %w", err)
+	var instance *xcore.Instance
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt) * 700 * time.Millisecond
+			e.warn(fmt.Sprintf("повторный запуск ядра (%d из %d) через %v: %v",
+				attempt+1, attempts, delay, lastErr))
+			time.Sleep(delay)
+		}
+
+		cfg, parseErr := serial.LoadJSONConfig(bytes.NewReader(configJSON))
+		if parseErr != nil {
+			return fmt.Errorf("разбор конфига Xray: %w", parseErr)
+		}
+
+		var startErr error
+		instance, startErr = xcore.New(cfg)
+		if startErr == nil {
+			startErr = instance.Start()
+		}
+		if startErr == nil {
+			lastErr = nil
+			break
+		}
+		if instance != nil {
+			_ = instance.Close() // недостроенный инстанс закрываем перед повтором
+			instance = nil
+		}
+		lastErr = fmt.Errorf("запуск ядра: %w", startErr)
+		e.warn(lastErr.Error())
 	}
-	if err := instance.Start(); err != nil {
-		_ = instance.Close()
-		return fmt.Errorf("запуск ядра: %w", err)
+	if lastErr != nil {
+		return lastErr
 	}
 
 	e.mu.Lock()
 	e.instance = instance
 	e.mu.Unlock()
 	return nil
+}
+
+// hasTunInbound проверяет, что конфиг содержит TUN-инбаунд: его адаптер
+// создаётся при создании ядра, и повторный запуск может столкнуться с тем,
+// что Windows ещё освобождает предыдущий адаптер.
+func hasTunInbound(configJSON []byte) bool {
+	return bytes.Contains(configJSON, []byte(`"protocol"`)) &&
+		bytes.Contains(configJSON, []byte(`"tun"`))
 }
 
 // Stop закрывает инстанс Xray, освобождая порты и TUN-адаптер. Ядро
