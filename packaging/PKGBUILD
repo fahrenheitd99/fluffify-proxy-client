@@ -15,7 +15,7 @@
 # fluffify-git/) — всё перечислено в корневом .gitignore.
 
 pkgname=fluffify-git
-pkgver=r7.a131d43
+pkgver=r8.68b1221
 pkgrel=1
 pkgdesc="TUI-менеджер и трей-клиент для Xray-core"
 arch=('x86_64' 'aarch64')
