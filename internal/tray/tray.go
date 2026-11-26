@@ -441,6 +441,17 @@ func onReady(socketPath string) {
 			_ = store.Save()
 			actionErr = ""
 		} else {
+			// TUN в этом процессе уже был: перезапускаем демона (UAC) и
+			// подключаем выбранный сервер после успеха.
+			if strings.Contains(err.Error(), "RESTART_REQUIRED") {
+				pendingConnect = prof
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+					elevateCh <- daemon.RestartElevated(ctx, socketPath)
+					cancel()
+				}()
+				return
+			}
 			actionErr = err.Error()
 		}
 	}

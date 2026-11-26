@@ -61,6 +61,29 @@ func TestHandleStartTUNCoreErrorIsNotRightsHint(t *testing.T) {
 	}
 }
 
+// Регрессия: повторный TUN в том же процессе невозможен (Xray не закрывает
+// wintun-сессию) — демон должен требовать перезапуск маркером RESTART_REQUIRED.
+func TestHandleStartTUNRequiresRestart(t *testing.T) {
+	old := hasTunPermission
+	hasTunPermission = func() bool { return true }
+	defer func() { hasTunPermission = old }()
+
+	d := New("/tmp/fluffify-test.sock")
+	d.sawTun = true
+
+	req := httptest.NewRequest(http.MethodPost, "/start",
+		strings.NewReader(`{"mode":"tun","config":{"outbounds":[]}}`))
+	rec := httptest.NewRecorder()
+	d.handleStart(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("код ответа %d, ждали %d: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "RESTART_REQUIRED") {
+		t.Fatalf("в ошибке нет маркера RESTART_REQUIRED: %s", rec.Body.String())
+	}
+}
+
 func TestStatusReportsElevation(t *testing.T) {
 	d := New("/tmp/fluffify-test.sock")
 	d.elevated = true

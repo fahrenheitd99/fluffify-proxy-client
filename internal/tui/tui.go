@@ -311,9 +311,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.notice = msg.err.Error()
 			m.noticeErr = true
 
-			// Демон запущен без прав: молча чиним — UAC на перезапуск демона
-			// и повторное подключение того же профиля, без трей-манипуляций.
-			if msg.profile != nil && strings.Contains(msg.err.Error(), "нет прав на TUN") {
+			// Демон запущен без прав (или в нём уже был TUN): молча чиним —
+			// UAC на перезапуск демона и повторное подключение того же
+			// профиля, без ручных манипуляций.
+			if msg.profile != nil && (strings.Contains(msg.err.Error(), "нет прав на TUN") ||
+				strings.Contains(msg.err.Error(), "RESTART_REQUIRED")) {
 				pending := *msg.profile
 				m.pendingConnect = &pending
 				m.busy = true

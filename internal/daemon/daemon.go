@@ -65,6 +65,10 @@ func tunHint() string {
 type Daemon struct {
 	socketPath string
 	engine     *engine.Engine
+	// sawTun — в этом процессе уже поднимался TUN: Xray не умеет закрывать
+	// wintun-сессию (у tun.Handler нет Close), поэтому второй TUN требует
+	// перезапуска демона — новый процесс освобождает адаптер.
+	sawTun bool
 
 	logMu    sync.Mutex
 	logLines []string
@@ -298,12 +302,22 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		tunName = "xray0"
 	}
 
-	// TUN создаёт само ядро внутри этого процесса: в Windows нужен админ
+	// TUN создаёт само ядро внутри этого процесса. В Windows нужен админ
 	// (демон уже запускается через UAC), в Linux — CAP_NET_ADMIN в юните
 	// systemd либо setcap на наш бинарник.
 	if mode == "tun" && !hasTunPermission() {
 		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: fmt.Sprintf(
 			"у демона нет прав на TUN — %s", tunHint())})
+		return
+	}
+
+	// Повторный TUN в этом же процессе невозможен: Xray не закрывает
+	// wintun-сессию при остановке инстанса (у tun.Handler нет Close), и
+	// Windows держит адаптер до смерти процесса. Просим клиента перезапустить
+	// демона — свежий процесс освобождает адаптер и TUN поднимается.
+	if mode == "tun" && d.sawTun {
+		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: fmt.Sprintf(
+			"для TUN нужен перезапуск демона — подтверди запрос UAC (RESTART_REQUIRED)")})
 		return
 	}
 
@@ -324,6 +338,12 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Старт синхронный: вернувшаяся ошибка уже описывает проблему ядра.
+	if mode == "tun" {
+		// Сессия wintun создаётся уже при создании ядра и не закрывается
+		// Xray — фиксируем, что в этом процессе TUN уже был.
+		d.sawTun = true
+	}
+
 	if err := d.engine.Start(cfg, req.AssetDir); err != nil {
 		errMsg := err.Error()
 		// Подсказка про права только при реальном их отсутствии, иначе
