@@ -29,8 +29,6 @@ import (
 	"xray-tui/internal/ping"
 	"xray-tui/internal/tray"
 	"xray-tui/internal/tui"
-
-	xcore "github.com/xtls/xray-core/core"
 )
 
 func main() {
@@ -60,9 +58,12 @@ func run(cmd string, args []string) error {
 		if osutil.SelfElevateDaemon() {
 			return nil
 		}
+		if err := ensureCoreExtracted(); err != nil {
+			return err
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 		defer stop()
-		return daemon.New(sock).Run(ctx)
+		return daemon.New(sock, osutil.CoreBinPath()).Run(ctx)
 
 	case "daemon-hidden":
 		// Тот же демон, но сразу прячет своё окно консоли: так его запускает
@@ -71,9 +72,12 @@ func run(cmd string, args []string) error {
 			return nil
 		}
 		osutil.HideConsoleIfOwned()
+		if err := ensureCoreExtracted(); err != nil {
+			return err
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 		defer stop()
-		return daemon.New(sock).Run(ctx)
+		return daemon.New(sock, osutil.CoreBinPath()).Run(ctx)
 
 	case "up", "start":
 		return runUp(sock, args)
@@ -167,6 +171,9 @@ func run(cmd string, args []string) error {
 		return nil
 
 	case "ping":
+		if err := ensureCoreExtracted(); err != nil {
+			return err
+		}
 		return runPing(args)
 
 	case "restart-admin":
@@ -185,6 +192,17 @@ func run(cmd string, args []string) error {
 		printUsage()
 		return fmt.Errorf("неизвестная команда: %s", cmd)
 	}
+}
+
+// ensureCoreExtracted распаковывает встроенное ядро (xray.exe и wintun.dll
+// в Windows) в %LocalAppData%\Fluffify\bin — там ядро живёт постоянно, exe
+// можно носить куда угодно. В Linux это no-op: ядро ставится системным
+// пакетом и ищется в PATH.
+func ensureCoreExtracted() error {
+	if _, err := osutil.EnsureCoreFiles(); err != nil {
+		return fmt.Errorf("не удалось извлечь встроенное ядро: %w", err)
+	}
+	return nil
 }
 
 func runUp(sock string, args []string) error {
@@ -333,7 +351,7 @@ func measureProfilePing(store *config.Store, prof *config.Profile) (time.Duratio
 			return 0, err
 		}
 	}
-	return ping.Measure(context.Background(), cfg, store.Settings.PingURL)
+	return ping.Measure(context.Background(), osutil.CoreBinPath(), cfg, store.Settings.PingURL)
 }
 
 func runAdd(args []string) error {
@@ -752,7 +770,7 @@ func runHWID(args []string) error {
 
 func runLicenses() error {
 	fmt.Println("Fluffify — лицензия приложения GPL-3.0-or-later")
-	fmt.Printf("Ядро: Xray-core %s (встроено в бинарник)\n\n", xcore.Version())
+	fmt.Printf("Ядро: Xray-core %s (встроен в Fluffify.exe)\n\n", about.XrayCoreVersion)
 	fmt.Println(about.Combined())
 	return nil
 }
@@ -986,19 +1004,20 @@ func ensureDaemonRunning(sock string) {
 		}
 	}
 
-	// 2. Windows: если демона нет — поднимаем его только с правами администратора.
-	//    Обычный (без прав) демон не оставляем: он держал бы сокет и ТУ�? требовал
-	//    бы ручного ремонта. Если UAC отклонён — демона нет, и следующий запуск
-	//    снова запросит права.
+	// 2. Windows: если демона нет — поднимаем его сразу с правами администратора.
+	//    Так TUN работает без лишних действий, а сам TUI остаётся обычным
+	//    процессом в консоли пользователя. Если пользователь отклонит UAC,
+	//    ниже запустится обычный демон (прокси работает, а TUN при подключении
+	//    сам попросит права и перезапустит демон).
 	if osutil.TunRequiresAdmin() {
 		fmt.Fprintln(os.Stderr, "Запускаю демон с правами администратора (запрос UAC)...")
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		startErr := daemon.StartElevated(ctx, sock)
 		cancel()
-		if startErr != nil {
-			fmt.Fprintf(os.Stderr, "демон не запущен (%v) — запусти приложение заново и подтверди UAC\n", startErr)
+		if startErr == nil {
+			return
 		}
-		return
+		fmt.Fprintf(os.Stderr, "демон с правами администратора не запущен (%v) — поднимаю обычный\n", startErr)
 	}
 
 	// 3. Фоллбэк (Linux без systemd): запускаем демон напрямую в отвязанной сессии

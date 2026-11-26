@@ -8,5 +8,5 @@ Fluffify is the crossplatform TUI proxy client based on xray-core
 exe можно носить отдельно от папки). Инструкция для пользователя —
 [`packaging/windows/README-RU.md`](packaging/windows/README-RU.md).
 
-Сборка: `./packaging/windows/build.sh` (нужен `llvm-windres`; файлы ядра
-ожидаются в `packaging/windows/`).
+Сборка: `./packaging/windows/build.sh` (нужен `llvm-windres`; ядро и драйвер
+берутся из встроенных ассетов `internal/osutil/assets/`).

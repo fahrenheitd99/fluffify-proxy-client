@@ -9,12 +9,15 @@ import (
 	"testing"
 )
 
-func TestHandleStartTUNWithoutPermission(t *testing.T) {
-	old := hasTunPermission
-	hasTunPermission = func() bool { return false }
-	defer func() { hasTunPermission = old }()
+// В Windows TUN требует прав администратора у демона: без прав /start
+// отвечает 409 с подсказкой перезапустить демон через restart-admin.
+func TestHandleStartTUNWithoutRights(t *testing.T) {
+	old := tunRequiresAdmin
+	tunRequiresAdmin = func() bool { return true }
+	defer func() { tunRequiresAdmin = old }()
 
-	d := New("/tmp/fluffify-test.sock")
+	d := New("/tmp/fluffify-test.sock", "")
+	d.elevated = false
 
 	req := httptest.NewRequest(http.MethodPost, "/start",
 		strings.NewReader(`{"mode":"tun","config":{"outbounds":[]}}`))
@@ -25,18 +28,20 @@ func TestHandleStartTUNWithoutPermission(t *testing.T) {
 		t.Fatalf("код ответа %d, ждали %d: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "TUN") || !strings.Contains(body, "прав") {
-		t.Fatalf("в ошибке нет подсказки про права: %s", body)
+	if !strings.Contains(body, "TUN") || !strings.Contains(body, "restart-admin") {
+		t.Fatalf("в ошибке нет подсказки про restart-admin: %s", body)
 	}
 }
 
 // Регрессия: ошибка ядра в TUN-режиме у демона С правами не должна
-// маскироваться под проблему отсутствия прав (раньше подсказка про UAC
-// добавлялась к любой ошибке, и повторный TUN выглядел как «нет прав»).
+// маскироваться под проблему отсутствия прав.
 func TestHandleStartTUNCoreErrorIsNotRightsHint(t *testing.T) {
-	old := hasTunPermission
-	hasTunPermission = func() bool { return true }
-	defer func() { hasTunPermission = old }()
+	old := tunRequiresAdmin
+	tunRequiresAdmin = func() bool { return true }
+	defer func() { tunRequiresAdmin = old }()
+
+	d := New("/tmp/fluffify-test.sock", "")
+	d.elevated = true
 
 	// Занимаем порт: старт ядра с этим портом упадёт с ошибкой окружения.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -46,7 +51,6 @@ func TestHandleStartTUNCoreErrorIsNotRightsHint(t *testing.T) {
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
 
-	d := New("/tmp/fluffify-test.sock")
 	cfg := fmt.Sprintf(`{"mode":"tun","config":{"inbounds":[{"tag":"i","listen":"127.0.0.1","port":%d,"protocol":"socks"}],"outbounds":[{"tag":"direct","protocol":"freedom"}]}}`, port)
 	req := httptest.NewRequest(http.MethodPost, "/start", strings.NewReader(cfg))
 	rec := httptest.NewRecorder()
@@ -61,31 +65,8 @@ func TestHandleStartTUNCoreErrorIsNotRightsHint(t *testing.T) {
 	}
 }
 
-// Регрессия: повторный TUN в том же процессе невозможен (Xray не закрывает
-// wintun-сессию) — демон должен требовать перезапуск маркером RESTART_REQUIRED.
-func TestHandleStartTUNRequiresRestart(t *testing.T) {
-	old := hasTunPermission
-	hasTunPermission = func() bool { return true }
-	defer func() { hasTunPermission = old }()
-
-	d := New("/tmp/fluffify-test.sock")
-	d.sawTun = true
-
-	req := httptest.NewRequest(http.MethodPost, "/start",
-		strings.NewReader(`{"mode":"tun","config":{"outbounds":[]}}`))
-	rec := httptest.NewRecorder()
-	d.handleStart(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("код ответа %d, ждали %d: %s", rec.Code, http.StatusConflict, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "RESTART_REQUIRED") {
-		t.Fatalf("в ошибке нет маркера RESTART_REQUIRED: %s", rec.Body.String())
-	}
-}
-
 func TestStatusReportsElevation(t *testing.T) {
-	d := New("/tmp/fluffify-test.sock")
+	d := New("/tmp/fluffify-test.sock", "")
 	d.elevated = true
 	if !d.statusSnapshot().Elevated {
 		t.Fatal("статус должен сообщать о правах администратора")

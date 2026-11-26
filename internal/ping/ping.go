@@ -1,6 +1,7 @@
 package ping
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,18 +10,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
-	"xray-tui/internal/engine"
+	"xray-tui/internal/osutil"
 )
 
 const DefaultTestURL = "https://cp.cloudflare.com/generate_204"
 
-// Measure поднимает временный инстанс ядра в памяти и замеряет HTTP HEAD RTT
-// через его HTTP-прокси. Дочерних процессов нет: инстанс живёт в этом же
-// процессе и закрывается сразу после замера.
-func Measure(ctx context.Context, rawConfig []byte, testURL string) (time.Duration, error) {
+// Measure поднимает временный xray и замеряет HTTP HEAD RTT через прокси.
+func Measure(ctx context.Context, xrayBin string, rawConfig []byte, testURL string) (time.Duration, error) {
+	if xrayBin == "" {
+		xrayBin = osutil.ResolveBinary("xray")
+	}
 	if testURL == "" {
 		testURL = DefaultTestURL
 	}
@@ -38,14 +43,33 @@ func Measure(ctx context.Context, rawConfig []byte, testURL string) (time.Durati
 	runCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
-	eng := engine.New(engine.Options{})
-	if err := eng.Start(patchedCfg, ""); err != nil {
-		return 0, fmt.Errorf("не удалось запустить ядро в памяти: %w", err)
+	cmd := exec.CommandContext(runCtx, xrayBin, "run", "-c", "stdin:")
+	cmd.Stdin = bytes.NewReader(patchedCfg)
+	if dir := osutil.SiblingAssetDir(xrayBin); dir != "" {
+		cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+dir)
 	}
-	defer func() { _ = eng.Stop() }()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = io.Discard
+
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("ошибка запуска xray: %w", err)
+	}
+
+	exitCh := make(chan error, 1)
+	go func() {
+		exitCh <- cmd.Wait()
+	}()
+
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-exitCh
+	}()
 
 	proxyAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
-	if err := waitPort(runCtx, proxyAddr); err != nil {
+	if err := waitPort(runCtx, proxyAddr, exitCh, &stderr); err != nil {
 		return 0, err
 	}
 
@@ -232,8 +256,7 @@ func findFreePort() (int, error) {
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
-// waitPort дожидается, когда временный инбаунд начнёт принимать соединения.
-func waitPort(ctx context.Context, addr string) error {
+func waitPort(ctx context.Context, addr string, exitCh <-chan error, stderr *bytes.Buffer) error {
 	deadline := time.NewTimer(2500 * time.Millisecond)
 	defer deadline.Stop()
 	ticker := time.NewTicker(25 * time.Millisecond)
@@ -243,8 +266,15 @@ func waitPort(ctx context.Context, addr string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-exitCh:
+			msg := strings.TrimSpace(stderr.String())
+			if msg != "" {
+				lines := strings.Split(msg, "\n")
+				return errors.New(lines[len(lines)-1])
+			}
+			return fmt.Errorf("xray завершился до старта: %v", err)
 		case <-deadline.C:
-			return errors.New("таймаут ожидания временного прокси")
+			return errors.New("таймаут запуска временного xray")
 		case <-ticker.C:
 			conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
 			if err == nil {

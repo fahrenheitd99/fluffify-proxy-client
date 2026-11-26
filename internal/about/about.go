@@ -24,6 +24,10 @@ type Entry struct {
 // ProjectLicense — лицензия самого Fluffify.
 const ProjectLicense = "GPL-3.0-or-later"
 
+// XrayCoreVersion — версия ядра, встроенного в релизный exe
+// (пакет Xray-windows-64.zip, из которого собран ассет xray.exe.gz).
+const XrayCoreVersion = "26.11.9"
+
 // ProjectName — название приложения (папка данных использует его же).
 const ProjectName = "Fluffify"
 
