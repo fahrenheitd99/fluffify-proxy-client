@@ -851,7 +851,7 @@ func (m model) renderProfilesList(w, h int) string {
 
 		geoName := rp.GeoProviderID
 		if p := m.store.FindGeoProvider(rp.GeoProviderID); p != nil {
-			geoName = p.Name
+			geoName = uiutil.Display(p.Name)
 		}
 		right := styleMuted.Render(fmt.Sprintf(" %d прав. · %s", len(rp.Rules), geoName))
 		leftW := termWidth(prefix) + termWidth(dot)
@@ -888,7 +888,7 @@ func (m model) renderProfileEdit(w, h int) string {
 
 	provName := "—"
 	if p := m.store.FindGeoProvider(rp.GeoProviderID); p != nil {
-		provName = p.Name
+		provName = uiutil.Display(p.Name)
 	}
 
 	geoSt := geo.Check(config.GeoProviderDir(rp.GeoProviderID))
@@ -942,12 +942,13 @@ func (m model) renderProfileEdit(w, h int) string {
 		leftW := termWidth(prefix) + termWidth(chk) + termWidth(badge) + 1
 		maxText := maxInt(8, w-leftW-1)
 
-		label := r.Name
+		ruleName := uiutil.Display(r.Name)
+		label := ruleName
 		if summary != "" {
-			label = r.Name + " " + styleMuted.Render("("+summary+")")
+			label = ruleName + " " + styleMuted.Render("("+summary+")")
 		}
 		if selected {
-			label = styleCursorRow.Render(clipLine(r.Name+" ("+summary+")", maxText))
+			label = styleCursorRow.Render(clipLine(ruleName+" ("+summary+")", maxText))
 		} else {
 			label = clipLine(label, maxText)
 		}

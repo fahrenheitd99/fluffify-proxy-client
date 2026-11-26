@@ -1,5 +1,5 @@
 // Package uiutil готовит строки к показу в терминале: часть символов,
-// которые понимает Unix-терминал, Windows Terminal отрисовать не может.
+// которые понимает не всякий терминал, заменяется на текстовый эквивалент.
 package uiutil
 
 import "strings"
@@ -8,9 +8,18 @@ import "strings"
 // складываются флаги стран (🇱🇹 = U+1F1F1 U+1F1F9).
 const regionalIndicatorBase = 0x1F1E6
 
+// Display приводит строку к виду, который одинаково рисуется везде: флаги
+// стран заменяются тегами, 🇱🇹 → [LT].
+//
+// Windows Terminal (и старый conhost) такие эмодзи не рисует: вместо флага
+// остаются буквы или кракозябры, и это ломает высоту строки в кадре. На Unix
+// терминалы чаще всего умеют флаги, но вид интерфейса держим одинаковым.
+func Display(s string) string {
+	return replaceRegionalFlags(s)
+}
+
 // replaceRegionalFlags меняет пары региональных индикаторов на текстовые теги:
-// 🇱🇹 → [LT]. В Windows Terminal такие эмодзи не рисуются, вместо них остаются
-// буквы или кракозябры, и это ломает высоту строки в кадре TUI.
+// 🇱🇹 → [LT].
 func replaceRegionalFlags(s string) string {
 	if !strings.ContainsFunc(s, isRegionalIndicator) {
 		return s
