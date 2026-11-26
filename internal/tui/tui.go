@@ -956,16 +956,19 @@ func animTickCmd(gen int) tea.Cmd {
 }
 
 func (m model) beginConnect(prof config.Profile, notice string) (tea.Model, tea.Cmd) {
-	// TUN в Windows возможен только у демона с правами администратора:
-	// просим UAC один раз и после перезапуска продолжаем подключение.
-	if m.store.Settings.Mode == config.ModeTUN && osutil.TunRequiresAdmin() &&
-		(m.status == nil || !m.status.Elevated) {
-		pending := prof
-		m.pendingConnect = &pending
-		m.busy = true
-		m.notice = "TUN: подтверди запрос прав администратора (UAC)"
-		m.noticeErr = false
-		return m, elevateDaemonCmd(m.sock)
+	// TUN в Windows возможен только у демона с правами администратора.
+	// Поднимаем его через UAC, если точно знаем, что он не поднят или упал:
+	// неизвестный статус не должен перезапускать работающий elevated-демон.
+	if m.store.Settings.Mode == config.ModeTUN && osutil.TunRequiresAdmin() {
+		daemonDown := m.daemonErr != "" || m.status == nil && m.daemonErr == ""
+		if daemonDown || (m.status != nil && !m.status.Elevated) {
+			pending := prof
+			m.pendingConnect = &pending
+			m.busy = true
+			m.notice = "TUN: подтверди запрос прав администратора (UAC)"
+			m.noticeErr = false
+			return m, elevateDaemonCmd(m.sock)
+		}
 	}
 
 	m.busy = true

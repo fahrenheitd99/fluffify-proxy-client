@@ -52,13 +52,21 @@ func run(cmd string, args []string) error {
 
 	switch cmd {
 	case "daemon":
+		// Демон обязан работать с правами администратора: если какой-то путь
+		// запуска поднял его без прав, он сам перезапускается elevated.
+		if osutil.SelfElevateDaemon() {
+			return nil
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 		defer stop()
 		return daemon.New(sock).Run(ctx)
 
 	case "daemon-hidden":
 		// Тот же демон, но сразу прячет своё окно консоли: так его запускает
-		// UAC-перезапуск (команда restart-admin).
+		// UAC-перезапуск (команды restart-admin и самоподнятие демона).
+		if osutil.SelfElevateDaemon() {
+			return nil
+		}
 		osutil.HideConsoleIfOwned()
 		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 		defer stop()
@@ -965,22 +973,22 @@ func ensureDaemonRunning(sock string) {
 		}
 	}
 
-	// 2. Windows: если демона нет — поднимаем его сразу с правами администратора.
-	//    Так TUN работает без лишних действий, а сам TUI остаётся обычным
-	//    процессом в консоли пользователя. Если пользователь отклонит UAC,
-	//    ниже запустится обычный демон (прокси работает, TUN попросит права позже).
+	// 2. Windows: если демона нет — поднимаем его только с правами администратора.
+	//    Обычный (без прав) демон не оставляем: он держал бы сокет и ТУ�? требовал
+	//    бы ручного ремонта. Если UAC отклонён — демона нет, и следующий запуск
+	//    снова запросит права.
 	if osutil.TunRequiresAdmin() {
 		fmt.Fprintln(os.Stderr, "Запускаю демон с правами администратора (запрос UAC)...")
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		startErr := daemon.StartElevated(ctx, sock)
 		cancel()
-		if startErr == nil {
-			return
+		if startErr != nil {
+			fmt.Fprintf(os.Stderr, "демон не запущен (%v) — запусти приложение заново и подтверди UAC\n", startErr)
 		}
-		fmt.Fprintf(os.Stderr, "демон с правами администратора не запущен (%v) — поднимаю обычный\n", startErr)
+		return
 	}
 
-	// 3. Фоллбэк: запускаем демон напрямую в отвязанной фоновой сессии
+	// 3. Фоллбэк (Linux без systemd): запускаем демон напрямую в отвязанной сессии
 	exe, err := os.Executable()
 	if err != nil {
 		return

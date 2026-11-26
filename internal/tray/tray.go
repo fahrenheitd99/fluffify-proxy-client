@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -67,6 +68,13 @@ func ensureDaemon(socketPath string) {
 		return
 	}
 	if autostart.Start() && waitForDaemon(client, 1500*time.Millisecond) {
+		return
+	}
+
+	if runtime.GOOS == "windows" {
+		// В Windows демон обязан работать с правами администратора, поэтому
+		// «обычный» демон не запускаем: он поднимется при запуске Fluffify.exe
+		// (запрос UAC) или по действию в трее «Демон от администратора».
 		return
 	}
 
@@ -230,6 +238,9 @@ func onReady(socketPath string) {
 	// actionErr — последняя ошибка действия (подключение, TUN): показываем её,
 	// пока операция не завершится успешно.
 	actionErr := ""
+	// pendingConnect — сервер, выбранный до починки демона: подключаем его
+	// сразу после самоподнятия демона с правами.
+	var pendingConnect *config.Profile
 
 	syncUI := func() {
 		// Живое обновление цвета при смене акцента (KDE Plasma; на Windows путь пуст)
@@ -324,7 +335,11 @@ func onReady(socketPath string) {
 		switch {
 		case err != nil:
 			wantIcon = "err"
-			wantTooltip = "Fluffify — нет связи с демоном"
+			if runtime.GOOS == "windows" {
+				wantTooltip = "Fluffify — демон не запущен: запусти Fluffify.exe (UAC) или «Демон от администратора»"
+			} else {
+				wantTooltip = "Fluffify — нет связи с демоном"
+			}
 			wantStatus = "✕ Демон не запущен"
 			wantToggle = "Подключить"
 		case actionErr != "":
@@ -389,6 +404,21 @@ func onReady(socketPath string) {
 		if prof == nil {
 			actionErr = "нет ни одного сервера — добавь подписку или ключ"
 			return
+		}
+		// Демон должен работать: в Windows без прав он не поднимается сам,
+		// поэтому чиним его явным действием пользователя (запрос UAC) и
+		// подключаем выбранный сервер сразу после успеха.
+		if _, err := client.Status(); err != nil {
+			if runtime.GOOS == "windows" {
+				pendingConnect = prof
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+					elevateCh <- daemon.StartElevated(ctx, socketPath)
+					cancel()
+				}()
+				return
+			}
+			ensureDaemon(socketPath)
 		}
 		res, err := generator.BuildForProfile(store, prof)
 		if err != nil {
@@ -490,6 +520,12 @@ func onReady(socketPath string) {
 					actionErr = err.Error()
 				} else {
 					actionErr = ""
+				}
+				if pendingConnect != nil {
+					prof := pendingConnect
+					pendingConnect = nil
+					connectProfile(prof)
+					return
 				}
 				syncUI()
 

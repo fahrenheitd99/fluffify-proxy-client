@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Собирает Fluffify.exe со значком и версией и упаковывает готовый к раздаче
 # архив. Ядро Xray встроено в бинарник (github.com/xtls/xray-core), поэтому
-# xray.exe в архиве больше не нужен; wintun.dll остаётся — его грузит ядро
-# для TUN-режима.
+# xray.exe в архиве больше не нужен; wintun.dll остаётся на виду — его грузит
+# ядро для TUN-режима (и запасная копия встроена в exe).
 # Геобазы (geoip.dat/geosite.dat) в архив не попадают: клиент качает их сам,
 # когда нужны правила роутинга по доменам/странам.
-# Требуется llvm-windres (пакет llvm) и Go.
+# Требуется llvm-windres (пакет llvm), Go и python3.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -15,8 +15,13 @@ if ! command -v llvm-windres >/dev/null 2>&1; then
 	echo "нужен llvm-windres (LLVM) — им собирается ресурс с иконкой" >&2
 	exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+	echo "нужен python3 — им собирается zip-архив" >&2
+	exit 1
+fi
 
-# Лицензии и wintun.dll кладём в packaging/windows из Xray-windows-64.zip.
+# Лицензии и документацию берём из packaging/windows (распакованы из
+# Xray-windows-64.zip) и складываем в архив в папку docs/.
 core=(wintun.dll LICENSE-Xray LICENSE-Wintun README-Xray.md Xray-version.txt)
 missing=0
 for f in "${core[@]}"; do
@@ -39,25 +44,26 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 rm -f packaging/windows/xray-tui.exe
 rm -f packaging/windows/geoip.dat packaging/windows/geosite.dat
 
-files=("$app" README-RU.md "${core[@]}")
-
-if command -v zip >/dev/null 2>&1; then
-	rm -f packaging/windows/fluffify-windows-amd64.zip
-	(cd packaging/windows && zip -q fluffify-windows-amd64.zip "${files[@]}")
-elif command -v python3 >/dev/null 2>&1; then
-	python3 - "${files[@]}" <<'PY'
-import pathlib, sys, zipfile
+# Верхний уровень архива — только exe и wintun.dll, весь текст идёт в docs/.
+python3 - <<'PY'
+import pathlib, zipfile
 
 base = pathlib.Path("packaging/windows")
 target = base / "fluffify-windows-amd64.zip"
+top = ["Fluffify.exe", "wintun.dll"]
+docs = ["README-RU.md", "LICENSE-Xray", "LICENSE-Wintun", "README-Xray.md", "Xray-version.txt"]
+
+for name in top + docs:
+    if not (base / name).is_file():
+        raise SystemExit(f"нет packaging/windows/{name}")
+
 with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
-    for name in sys.argv[1:]:
+    for name in top:
         z.write(base / name, name)
+    for name in docs:
+        z.write(base / name, "docs/" + name)
+print("архив:", target)
 PY
-else
-	echo "готово: packaging/windows/$app (zip-утилита не найдена)" >&2
-	exit 0
-fi
 
 echo "готово: packaging/windows/$app и fluffify-windows-amd64.zip"
 ls -lh packaging/windows/fluffify-windows-amd64.zip
