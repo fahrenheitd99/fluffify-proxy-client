@@ -11,11 +11,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
+	"xray-tui/internal/daemon"
 	"xray-tui/internal/generator"
 	"xray-tui/internal/ipc"
+	"xray-tui/internal/osutil"
 	"xray-tui/internal/parser"
 	"xray-tui/internal/ping"
+	"xray-tui/internal/uiutil"
 )
 
 type tabID int
@@ -48,14 +52,17 @@ type treeRow struct {
 }
 
 type subFormState struct {
-	active   bool
-	mode     subFormMode // 0=подписка, 1=ссылка, 2=JSON
-	step     int         // для подписки: 0=URL, 1=Название, 2=HWID
-	url      string
-	name     string
-	sendHWID bool
-	link     string
-	rawJSON  string
+	active     bool
+	mode       subFormMode // 0=подписка, 1=ссылка, 2=JSON
+	step       int         // для подписки: 0=URL, 1=Название, 2=HWID
+	url        string
+	urlPasted  bool
+	name       string
+	sendHWID   bool
+	link       string
+	linkPasted bool
+	rawJSON    string
+	jsonPasted bool
 }
 
 // --- Сообщения Bubble Tea ---
@@ -72,10 +79,10 @@ type statusMsg struct {
 }
 
 type actionDoneMsg struct {
-	status *ipc.StatusResponse
+	status    *ipc.StatusResponse
 	profileID string
-	notice string
-	err    error
+	notice    string
+	err       error
 }
 
 type pingResultMsg struct {
@@ -87,10 +94,14 @@ type pingResultMsg struct {
 type subSyncDoneMsg struct {
 	store  *config.Store
 	notice string
+	logs   []string
 	err    error
 }
 
 type logLineMsg string
+
+// elevateDoneMsg приходит после попытки перезапустить демон с правами админа.
+type elevateDoneMsg struct{ err error }
 
 type model struct {
 	client *ipc.Client
@@ -126,6 +137,11 @@ type model struct {
 	// Вкладка Подписки
 	subCursor int
 	subForm   subFormState
+	burst     burstState
+
+	// Сокет демона и профиль, который ждёт перезапуска демона с правами админа
+	sock           string
+	pendingConnect *config.Profile
 
 	// Вкладка Настройки + профили роутинга
 	settingsCursor    int
@@ -185,11 +201,12 @@ func Run(socketPath string) error {
 	m := model{
 		client:           client,
 		store:            store,
+		sock:             socketPath,
 		width:            48,
 		height:           34,
 		collapsed:        make(map[string]bool),
 		pings:            make(map[string]pingState),
-		autostartEnabled: isSystemdAutostartEnabled(),
+		autostartEnabled: autostart.Enabled(),
 		logAutoScroll:    true,
 		logCh:            logCh,
 	}
@@ -203,7 +220,7 @@ func Run(socketPath string) error {
 	}
 	m.clampTreeScroll()
 
-    prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = prog.Run()
 	return err
 }
@@ -217,6 +234,9 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		m = m.trackInputBurst(key)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -329,6 +349,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case subSyncDoneMsg:
 		m.busy = false
+		m.appendLogs(msg.logs)
 		if msg.err != nil {
 			m.notice = msg.err.Error()
 			m.noticeErr = true
@@ -346,13 +367,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case logLineMsg:
-		m.logs = append(m.logs, string(msg))
-		if len(m.logs) > 300 {
-			m.logs = m.logs[len(m.logs)-300:]
-		}
-		if m.logAutoScroll {
-			m.scrollLogsToBottom()
-		}
+		m.appendLogs([]string{string(msg)})
 		return m, waitForLogCmd(m.logCh)
 
 	case geoDownloadDoneMsg:
@@ -363,8 +378,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.notice = fmt.Sprintf("Геобазы %s скачаны (%s)", msg.providerName, formatBytesShort(msg.status.TotalBytes))
 			m.noticeErr = false
+			// Если прокси уже работает с роутингом — пересобираем конфиг,
+			// чтобы новые геобазы подхватились сразу.
+			if m.store.Routing.Enabled {
+				return m.applyRoutingNowKeep()
+			}
 		}
 		return m, nil
+
+	case elevateDoneMsg:
+		if msg.err != nil {
+			m.busy = false
+			m.connecting = false
+			m.pendingConnect = nil
+			m.notice = "Не удалось получить права администратора: " + msg.err.Error()
+			m.noticeErr = true
+			return m, nil
+		}
+		if m.pendingConnect != nil {
+			prof := *m.pendingConnect
+			m.pendingConnect = nil
+			return m.beginConnect(prof, "Демон с правами администратора — подключаюсь...")
+		}
+		m.busy = false
+		m.notice = "Демон перезапущен с правами администратора"
+		m.noticeErr = false
+		return m, m.fetchStatusCmd()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -773,30 +812,7 @@ func (m model) handleSubFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.subForm.step++
 			return m, nil
 		}
-		u := strings.TrimSpace(m.subForm.url)
-		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-			m.notice = "URL должен начинаться с http:// или https://"
-			m.noticeErr = true
-			return m, nil
-		}
-		sub := config.Subscription{
-			ID:       config.NewID(),
-			Name:     strings.TrimSpace(m.subForm.name),
-			URL:      u,
-			SendHWID: m.subForm.sendHWID,
-		}
-		m.store.Subscriptions = append(m.store.Subscriptions, sub)
-		if err := m.store.Save(); err != nil {
-			m.notice = "Ошибка сохранения: " + err.Error()
-			m.noticeErr = true
-			return m, nil
-		}
-		idx := len(m.store.Subscriptions) - 1
-		m.subForm = subFormState{}
-		m.busy = true
-		m.notice = "Загружаю подписку..."
-		m.noticeErr = false
-		return m, m.syncSubsCmd(idx)
+		return m.applySmartInput(m.subForm.url)
 	case "backspace":
 		if m.subForm.step == 0 {
 			m.subForm.url = trimLastRune(m.subForm.url)
@@ -826,7 +842,7 @@ func (m model) renderSubForm(w, h int) string {
 
 	switch m.subForm.mode {
 	case subModeLink:
-		val := m.subForm.link
+		val := fieldValue(m.subForm.link, m.subForm.linkPasted)
 		if runes := []rune(val); len(runes) > 220 {
 			val = "…" + string(runes[len(runes)-220:])
 		}
@@ -834,7 +850,7 @@ func (m model) renderSubForm(w, h int) string {
 		hint = "  ←→ режим · Enter — добавить · Esc"
 
 	case subModeJSON:
-		val := strings.ReplaceAll(strings.ReplaceAll(m.subForm.rawJSON, "\r", ""), "\n", " ")
+		val := fieldValue(m.subForm.rawJSON, m.subForm.jsonPasted)
 		if runes := []rune(val); len(runes) > 220 {
 			val = fmt.Sprintf("(%d симв.) …%s", len(runes), string(runes[len(runes)-200:]))
 		}
@@ -842,14 +858,15 @@ func (m model) renderSubForm(w, h int) string {
 		hint = "  ←→ режим · Enter — добавить · Esc"
 
 	default:
-		uVal, nVal := m.subForm.url, m.subForm.name
+		uVal := fieldValue(m.subForm.url, m.subForm.urlPasted)
+		nVal := sanitizeInput(m.subForm.name)
 		if m.subForm.step == 0 {
 			uVal += bar
 		}
 		if m.subForm.step == 1 {
 			nVal += bar
 		}
-		rows = append(rows, wrapField("1. URL", uVal, m.subForm.step == 0, innerW)...)
+		rows = append(rows, wrapField("1. Ссылка или подписка", uVal, m.subForm.step == 0, innerW)...)
 		rows = append(rows, wrapField("2. Имя (опц.)", nVal, m.subForm.step == 1, innerW)...)
 		rows = append(rows, renderFormField("3. HWID (←/→)", "["+onOffLabel(m.subForm.sendHWID)+"]", m.subForm.step == 2, innerW))
 		hint = "  ←→ режим · ↑↓ поля · Enter — далее / доб · Esc"
@@ -939,6 +956,18 @@ func animTickCmd(gen int) tea.Cmd {
 }
 
 func (m model) beginConnect(prof config.Profile, notice string) (tea.Model, tea.Cmd) {
+	// TUN в Windows возможен только у демона с правами администратора:
+	// просим UAC один раз и после перезапуска продолжаем подключение.
+	if m.store.Settings.Mode == config.ModeTUN && osutil.TunRequiresAdmin() &&
+		(m.status == nil || !m.status.Elevated) {
+		pending := prof
+		m.pendingConnect = &pending
+		m.busy = true
+		m.notice = "TUN: подтверди запрос прав администратора (UAC)"
+		m.noticeErr = false
+		return m, elevateDaemonCmd(m.sock)
+	}
+
 	m.busy = true
 	m.connecting = true
 	m.animGen++
@@ -966,6 +995,14 @@ func (m model) beginDisconnect() (tea.Model, tea.Cmd) {
 func waitForLogCmd(ch <-chan string) tea.Cmd {
 	return func() tea.Msg {
 		return logLineMsg(<-ch)
+	}
+}
+
+func elevateDaemonCmd(sock string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		return elevateDoneMsg{err: daemon.RestartElevated(ctx, sock)}
 	}
 }
 
@@ -1018,7 +1055,7 @@ func (m model) connectProfileCmd(prof config.Profile) tea.Cmd {
 		}
 
 		return actionDoneMsg{
-			status: st,
+			status:    st,
 			profileID: prof.ID,
 		}
 	}
@@ -1074,7 +1111,7 @@ func (m model) pingProfileCmd(prof config.Profile, sem chan struct{}) tea.Cmd {
 			}
 		}
 
-		rtt, err := ping.Measure(context.Background(), "xray", cfg, pingURL)
+		rtt, err := ping.Measure(context.Background(), "", cfg, pingURL)
 		return pingResultMsg{profileID: prof.ID, rtt: rtt, err: err}
 	}
 }
@@ -1100,17 +1137,28 @@ func (m model) syncSubsCmd(subIndex int) tea.Cmd {
 
 		var failed int
 		var lastErr error
+		var logs []string
 		for _, idx := range targets {
-			if err := syncOneSub(store, &store.Subscriptions[idx]); err != nil {
+			sub := &store.Subscriptions[idx]
+			if err := syncOneSub(store, sub); err != nil {
 				failed++
 				lastErr = err
+				logs = append(logs, fmt.Sprintf("[подписка] %s: %v", subLabel(sub), err))
+				continue
 			}
+			count := 0
+			for _, p := range store.Profiles {
+				if p.SubID == sub.ID {
+					count++
+				}
+			}
+			logs = append(logs, fmt.Sprintf("[подписка] %s обновлена: %d нод", subLabel(sub), count))
 		}
 		if err := store.Save(); err != nil {
-			return subSyncDoneMsg{err: err}
+			return subSyncDoneMsg{err: err, logs: logs}
 		}
 		if failed > 0 && failed == len(targets) {
-			return subSyncDoneMsg{store: store, err: lastErr}
+			return subSyncDoneMsg{store: store, err: lastErr, logs: logs}
 		}
 		msg := fmt.Sprintf("Обновлено (%d серверов)", len(store.Profiles))
 		if len(targets) == 1 {
@@ -1119,7 +1167,36 @@ func (m model) syncSubsCmd(subIndex int) tea.Cmd {
 		if failed > 0 {
 			msg = fmt.Sprintf("Обновлено с ошибками (%d)", failed)
 		}
-		return subSyncDoneMsg{store: store, notice: msg}
+		return subSyncDoneMsg{store: store, notice: msg, logs: logs}
+	}
+}
+
+// subLabel — человекочитаемое имя подписки для логов.
+func subLabel(sub *config.Subscription) string {
+	if strings.TrimSpace(sub.Name) != "" {
+		return sub.Name
+	}
+	return sub.URL
+}
+
+// appendLogs добавляет строки в панель логи и не даёт ей расти бесконечно.
+func (m *model) appendLogs(lines []string) {
+	added := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		m.logs = append(m.logs, line)
+		added = true
+	}
+	if !added {
+		return
+	}
+	if len(m.logs) > 300 {
+		m.logs = m.logs[len(m.logs)-300:]
+	}
+	if m.logAutoScroll {
+		m.scrollLogsToBottom()
 	}
 }
 
@@ -1140,7 +1217,7 @@ func syncOneSub(store *config.Store, sub *config.Subscription) error {
 		UserAgent:   ua,
 		SendHWID:    sub.SendHWID,
 		HWID:        hwid,
-		DeviceOS:    "Linux",
+		DeviceOS:    osutil.OSName(),
 		DeviceVer:   config.DeviceOSVersion(),
 		DeviceModel: config.DeviceModel(),
 	})
@@ -1346,7 +1423,7 @@ func (m model) headerTitleRaw() string {
 func (m model) headerNameLines(w int) []string {
 	innerW := maxInt(20, w-4)
 	nameMaxW := maxInt(10, innerW-statusButtonW-1)
-	lines := wrapTextByWidth(m.headerTitleRaw(), nameMaxW)
+	lines := wrapTextByWidth(uiutil.Display(m.headerTitleRaw()), nameMaxW)
 	if len(lines) == 0 {
 		return []string{""}
 	}
@@ -1368,7 +1445,7 @@ func (m model) renderHeader(w int) string {
 	case m.daemonErr != "":
 		state = "err"
 		titleStyle = styleRed
-		line2 = styleMuted.Render("systemctl --user start xray-tui")
+		line2 = styleMuted.Render(daemonStartHint())
 		line3 = styleMuted.Render(m.daemonErr)
 
 	case m.status != nil && m.status.Running:
@@ -1508,7 +1585,6 @@ func (m model) renderHeader(w int) string {
 	return renderHeaderCard(cardLines, w, cardState)
 }
 
-
 func wrapTextByWidth(s string, maxW int) []string {
 	s = strings.TrimSpace(s)
 	if s == "" || maxW <= 0 {
@@ -1637,7 +1713,7 @@ func (m model) renderServers(w, h int) string {
 	isRunning := m.status != nil && m.status.Running
 	activeName := ""
 	if isRunning {
-		activeName = m.status.Profile
+		activeName = uiutil.Display(m.status.Profile)
 	}
 
 	lines := make([]string, 0, h)
@@ -1650,7 +1726,7 @@ func (m model) renderServers(w, h int) string {
 		r := rows[pos]
 		selected := pos == m.cursor
 
-	if r.isHeader {
+		if r.isHeader {
 			arrow := " ▾  "
 			if m.filter == "" && m.collapsed[r.groupID] {
 				arrow = " ▸  "
@@ -1670,7 +1746,7 @@ func (m model) renderServers(w, h int) string {
 			rightW := termWidth(rightRendered)
 			titleMax := maxInt(8, w-leftFixed-rightW-3)
 
-			titleText := clipLine(r.title, titleMax)
+			titleText := clipLine(uiutil.Display(r.title), titleMax)
 			if selected {
 				titleText = styleCursorRow.Bold(true).Render(titleText)
 				arrow = styleAccent.Bold(true).Render(arrow)
@@ -1719,7 +1795,7 @@ func (m model) renderServers(w, h int) string {
 		rightW := termWidth(right)
 		nameMax := maxInt(8, w-leftFixed-rightW-1)
 
-		nameText := clipLine(p.Name, nameMax)
+		nameText := clipLine(uiutil.Display(p.Name), nameMax)
 		if selected {
 			nameText = styleCursorRow.Render(nameText)
 		}
@@ -1855,7 +1931,7 @@ func (m model) wrappedLogLines(w int) []string {
 		case strings.Contains(raw, "[Warning]"):
 			style = styleYellow
 		}
-		chunks := wrapTerm(raw, contentW)
+		chunks := wrapTerm(uiutil.Display(raw), contentW)
 		if len(chunks) == 0 {
 			out = append(out, "")
 			continue
@@ -1944,10 +2020,11 @@ func (m model) renderFooter(w int) string {
 		if m.noticeErr {
 			st = styleRed
 		}
-		return sep + "\n" + clipLine(" "+st.Render(m.notice), w) + "\n" + bottomLine
+		return sep + "\n" + clipLine(" "+st.Render(uiutil.Display(m.notice)), w) + "\n" + bottomLine
 	}
 	return sep + "\n" + bottomLine
 }
+
 // --- Вспомогательные функции ---
 
 func (m model) listHeight() int {

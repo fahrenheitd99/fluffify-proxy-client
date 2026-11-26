@@ -55,9 +55,14 @@ func FetchSubscription(ctx context.Context, subURL string, opts FetchOptions) (*
 	if opts.Timeout == 0 {
 		opts.Timeout = 15 * time.Second
 	}
+
+	// Значения заголовков приходят из буфера обмена и могут содержать \r\n —
+	// net/http такую строку отвергает, поэтому чистим управляющие символы.
+	opts.UserAgent = sanitizeHeader(opts.UserAgent)
 	if opts.UserAgent == "" {
 		opts.UserAgent = "Fluffify/1.0.0"
 	}
+	opts.HWID = sanitizeHeader(opts.HWID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, subURL, nil)
 	if err != nil {
@@ -70,13 +75,13 @@ func FetchSubscription(ctx context.Context, subURL string, opts FetchOptions) (*
 	if opts.SendHWID && opts.HWID != "" {
 		req.Header.Set("x-hwid", opts.HWID)
 		if opts.DeviceOS != "" {
-			req.Header.Set("x-device-os", opts.DeviceOS)
+			req.Header.Set("x-device-os", sanitizeHeader(opts.DeviceOS))
 		}
 		if opts.DeviceVer != "" {
-			req.Header.Set("x-ver-os", opts.DeviceVer)
+			req.Header.Set("x-ver-os", sanitizeHeader(opts.DeviceVer))
 		}
 		if opts.DeviceModel != "" {
-			req.Header.Set("x-device-model", opts.DeviceModel)
+			req.Header.Set("x-device-model", sanitizeHeader(opts.DeviceModel))
 		}
 	}
 
@@ -88,7 +93,7 @@ func FetchSubscription(ctx context.Context, subURL string, opts FetchOptions) (*
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("сервер подписки вернул HTTP %d", resp.StatusCode)
+		return nil, httpStatusError(resp, opts.UserAgent)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
@@ -108,6 +113,35 @@ func FetchSubscription(ctx context.Context, subURL string, opts FetchOptions) (*
 		Warnings: warnings,
 		UserInfo: parseSubUserInfo(resp.Header.Get("subscription-userinfo")),
 	}, nil
+}
+
+// sanitizeHeader убирает управляющие символы и внешние пробелы из значения
+// заголовка: иначе net/http отказывается отправлять запрос.
+func sanitizeHeader(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s))
+}
+
+// httpStatusError описывает неуспешный ответ так, чтобы причину было видно
+// в логе: код, текст статуса, начало тела и отправленный User-Agent
+// (серверы подписок часто отказывают именно из-за него).
+func httpStatusError(resp *http.Response, userAgent string) error {
+	snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 100))
+	text := strings.Join(strings.Fields(string(snippet)), " ")
+	if runes := []rune(text); len(runes) > 100 {
+		text = string(runes[:100]) + "…"
+	}
+
+	if text == "" {
+		return fmt.Errorf("сервер подписки ответил %s (%d), User-Agent: %q",
+			resp.Status, resp.StatusCode, userAgent)
+	}
+	return fmt.Errorf("сервер подписки ответил %s (%d), User-Agent: %q, тело: %s",
+		resp.Status, resp.StatusCode, userAgent, text)
 }
 
 func ParseSubscriptionBody(body []byte) ([]SubItem, int, []string, error) {

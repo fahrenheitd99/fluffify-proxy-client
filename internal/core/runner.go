@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
+
+	"xray-tui/internal/osutil"
 )
 
 const defaultLogLimit = 200
@@ -29,7 +31,7 @@ type Runner struct {
 
 func NewRunner(binPath string, onLog func(line string)) *Runner {
 	if binPath == "" {
-		binPath = "xray"
+		binPath = osutil.ResolveBinary("xray")
 	}
 	return &Runner{
 		binPath:  binPath,
@@ -48,6 +50,9 @@ func (r *Runner) Start(configJSON []byte, assetDir string) error {
 
 	cmd := exec.Command(r.binPath, "run", "-c", "stdin:")
 	cmd.Stdin = bytes.NewReader(configJSON)
+	if assetDir == "" {
+		assetDir = osutil.SiblingAssetDir(r.binPath)
+	}
 	if assetDir != "" {
 		cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+assetDir)
 	}
@@ -59,6 +64,10 @@ func (r *Runner) Start(configJSON []byte, assetDir string) error {
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
 		_ = pr.Close()
+		if errors.Is(err, exec.ErrNotFound) {
+			return fmt.Errorf("не найден %s — положи %s рядом с %s или добавь его в PATH",
+				r.binPath, filepath.Base(r.binPath), osutil.SelfName())
+		}
 		return fmt.Errorf("не удалось запустить %s: %w", r.binPath, err)
 	}
 
@@ -111,7 +120,7 @@ func (r *Runner) Stop() error {
 	done := r.done
 	r.mu.Unlock() // обязательно отпускаем мьютекс до ожидания done
 
-	_ = proc.Signal(syscall.SIGTERM)
+	_ = osutil.Terminate(proc)
 
 	select {
 	case <-done:

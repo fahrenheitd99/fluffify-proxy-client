@@ -10,10 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"xray-tui/internal/osutil"
 )
 
 const DefaultTestURL = "https://cp.cloudflare.com/generate_204"
@@ -21,7 +24,7 @@ const DefaultTestURL = "https://cp.cloudflare.com/generate_204"
 // Measure поднимает временный xray и замеряет HTTP HEAD RTT через прокси.
 func Measure(ctx context.Context, xrayBin string, rawConfig []byte, testURL string) (time.Duration, error) {
 	if xrayBin == "" {
-		xrayBin = "xray"
+		xrayBin = osutil.ResolveBinary("xray")
 	}
 	if testURL == "" {
 		testURL = DefaultTestURL
@@ -42,6 +45,9 @@ func Measure(ctx context.Context, xrayBin string, rawConfig []byte, testURL stri
 
 	cmd := exec.CommandContext(runCtx, xrayBin, "run", "-c", "stdin:")
 	cmd.Stdin = bytes.NewReader(patchedCfg)
+	if dir := osutil.SiblingAssetDir(xrayBin); dir != "" {
+		cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+dir)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = io.Discard

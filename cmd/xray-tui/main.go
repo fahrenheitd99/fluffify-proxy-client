@@ -8,29 +8,32 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
-	"syscall"
-	"time"
-	"sort"
 	"sync"
+	"time"
 
+	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
 	"xray-tui/internal/daemon"
 	"xray-tui/internal/generator"
-	"xray-tui/internal/ipc"
-	"xray-tui/internal/parser"
-  "xray-tui/internal/ping"
-	"xray-tui/internal/tui"
 	"xray-tui/internal/geo"
+	"xray-tui/internal/ipc"
+	"xray-tui/internal/osutil"
+	"xray-tui/internal/parser"
+	"xray-tui/internal/ping"
 	"xray-tui/internal/tray"
-
+	"xray-tui/internal/tui"
 )
 
 func main() {
+	// В Windows включает ANSI-режим и UTF-8: без этого кадры TUI «плывут».
+	osutil.EnableVirtualTerminal()
+
 	cmd := "open"
 	var args []string
 	if len(os.Args) >= 2 {
@@ -49,9 +52,17 @@ func run(cmd string, args []string) error {
 
 	switch cmd {
 	case "daemon":
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 		defer stop()
-		return daemon.New(sock, "xray").Run(ctx)
+		return daemon.New(sock, "").Run(ctx)
+
+	case "daemon-hidden":
+		// Тот же демон, но сразу прячет своё окно консоли: так его запускает
+		// UAC-перезапуск (команда restart-admin).
+		osutil.HideConsoleIfOwned()
+		ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
+		defer stop()
+		return daemon.New(sock, "").Run(ctx)
 
 	case "up", "start":
 		return runUp(sock, args)
@@ -104,7 +115,7 @@ func run(cmd string, args []string) error {
 	case "logs":
 		client := ipc.NewClient(sock)
 		if len(args) > 0 && (args[0] == "-f" || args[0] == "--follow") {
-			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
 			defer stop()
 			return client.StreamLogs(ctx, func(line string) {
 				fmt.Println(line)
@@ -144,7 +155,10 @@ func run(cmd string, args []string) error {
 	case "ping":
 		return runPing(args)
 
-  case "open", "win":
+	case "restart-admin":
+		return runRestartAdmin(sock)
+
+	case "open", "win":
 		return runOpen(sock)
 
 	case "tun-setup":
@@ -305,7 +319,7 @@ func measureProfilePing(store *config.Store, prof *config.Profile) (time.Duratio
 			return 0, err
 		}
 	}
-	return ping.Measure(context.Background(), "xray", cfg, store.Settings.PingURL)
+	return ping.Measure(context.Background(), "", cfg, store.Settings.PingURL)
 }
 
 func runAdd(args []string) error {
@@ -320,7 +334,7 @@ func runAdd(args []string) error {
 		input = fs.Arg(0)
 	}
 	if input == "" {
-		return errors.New("укажи ссылку или путь к JSON: xray-tui add '<uri|file.json>' [-name 'Имя']")
+		return fmt.Errorf("укажи ссылку, JSON или путь к файлу: %s add '<uri|node.json>' [-name 'Имя']", osutil.SelfName())
 	}
 
 	store, err := config.Load()
@@ -328,9 +342,19 @@ func runAdd(args []string) error {
 		return err
 	}
 
-	var prof config.Profile
-	if strings.Contains(input, "://") {
-		node, err := parser.ParseURI(input)
+	kind, value := parser.ClassifyInput(input)
+	if kind == parser.InputSubscription {
+		fmt.Println("Это ссылка подписки — добавляю как подписку.")
+		subArgs := []string{value}
+		if *customName != "" {
+			subArgs = append(subArgs, "-name", *customName)
+		}
+		return runSubAdd(subArgs)
+	}
+
+	var profs []config.Profile
+	addURI := func(uri string) error {
+		node, err := parser.ParseURI(uri)
 		if err != nil {
 			return err
 		}
@@ -338,30 +362,28 @@ func runAdd(args []string) error {
 		if *customName != "" {
 			name = *customName
 		}
-		prof = config.Profile{
+		profs = append(profs, config.Profile{
 			ID:       config.NewID(),
 			Name:     name,
 			Type:     config.ProfileTypeURI,
 			Protocol: node.Protocol,
 			Address:  node.Address,
 			Port:     node.Port,
-			URI:      input,
+			URI:      uri,
 			AddedAt:  time.Now(),
-		}
-	} else {
-		raw, err := os.ReadFile(input)
-		if err != nil {
-			return fmt.Errorf("не удалось прочитать файл %s: %w", input, err)
-		}
-		item, ok := parser.InspectRawConfig(json.RawMessage(raw), filepath.Base(input))
+		})
+		return nil
+	}
+	addRaw := func(raw []byte, fileName string) error {
+		item, ok := parser.InspectRawConfig(json.RawMessage(raw), fileName)
 		if !ok {
-			return errors.New("файл не является валидным Xray JSON конфигом (отсутствует outbounds)")
+			return errors.New("не является валидным Xray JSON конфигом (отсутствует outbounds)")
 		}
 		name := item.Name
 		if *customName != "" {
 			name = *customName
 		}
-		prof = config.Profile{
+		profs = append(profs, config.Profile{
 			ID:       config.NewID(),
 			Name:     name,
 			Type:     config.ProfileTypeRaw,
@@ -370,14 +392,55 @@ func runAdd(args []string) error {
 			Port:     item.Port,
 			RawJSON:  item.RawJSON,
 			AddedAt:  time.Now(),
-		}
+		})
+		return nil
 	}
 
-	store.Profiles = append(store.Profiles, prof)
+	switch kind {
+	case parser.InputLink:
+		for _, line := range parser.TotalLines(value) {
+			if err := addURI(line); err != nil {
+				return err
+			}
+		}
+	case parser.InputJSON:
+		if err := addRaw([]byte(value), "вставленный JSON"); err != nil {
+			return err
+		}
+	case parser.InputFilePath:
+		raw, err := os.ReadFile(value)
+		if err != nil {
+			return fmt.Errorf("не удалось прочитать файл %s: %w", value, err)
+		}
+		contentKind, content := parser.ClassifyInput(string(raw))
+		switch contentKind {
+		case parser.InputJSON:
+			if err := addRaw([]byte(content), filepath.Base(value)); err != nil {
+				return err
+			}
+		case parser.InputLink:
+			for _, line := range parser.TotalLines(content) {
+				if err := addURI(line); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("%s не похож ни на JSON, ни на список ссылок", filepath.Base(value))
+		}
+	default:
+		return fmt.Errorf("не понял ввод %q: нужна ссылка, JSON или путь к файлу", input)
+	}
+
+	if len(profs) == 0 {
+		return errors.New("ничего не добавлено")
+	}
+	store.Profiles = append(store.Profiles, profs...)
 	if err := store.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("Добавлен профиль #%d: %s [%s]\n", len(store.Profiles), prof.Name, prof.Protocol)
+	for _, p := range profs {
+		fmt.Printf("Добавлен профиль: %s [%s]\n", p.Name, p.Protocol)
+	}
 	return nil
 }
 
@@ -387,7 +450,7 @@ func runList() error {
 		return err
 	}
 	if len(store.Profiles) == 0 {
-		fmt.Println("Профилей пока нет. Добавь через 'xray-tui add' или 'xray-tui sub add'.")
+		fmt.Printf("Профилей пока нет. Добавь через '%s add' или '%s sub add'.\n", osutil.SelfName(), osutil.SelfName())
 		return nil
 	}
 
@@ -404,7 +467,7 @@ func runList() error {
 
 func runRemove(args []string) error {
 	if len(args) < 1 {
-		return errors.New("укажи номер или имя профиля: xray-tui rm <номер|имя>")
+		return fmt.Errorf("укажи номер или имя профиля: %s rm <номер|имя>", osutil.SelfName())
 	}
 	store, err := config.Load()
 	if err != nil {
@@ -459,7 +522,7 @@ func runSubAdd(args []string) error {
 		subURL = fs.Arg(0)
 	}
 	if subURL == "" {
-		return errors.New("укажи URL подписки: xray-tui sub add '<url>' [-name ...] [-ua ...]")
+		return fmt.Errorf("укажи URL подписки: %s sub add '<url>' [-name ...] [-ua ...]", osutil.SelfName())
 	}
 
 	store, err := config.Load()
@@ -544,7 +607,7 @@ func syncSubscription(store *config.Store, sub *config.Subscription) error {
 		UserAgent:   ua,
 		SendHWID:    sub.SendHWID,
 		HWID:        hwid,
-		DeviceOS:    "Linux",
+		DeviceOS:    osutil.OSName(),
 		DeviceVer:   config.DeviceOSVersion(),
 		DeviceModel: config.DeviceModel(),
 	})
@@ -636,7 +699,7 @@ func runSubList() error {
 
 func runSubRemove(args []string) error {
 	if len(args) < 1 {
-		return errors.New("укажи номер или имя подписки: xray-tui sub rm <номер|имя>")
+		return fmt.Errorf("укажи номер или имя подписки: %s sub rm <номер|имя>", osutil.SelfName())
 	}
 	store, err := config.Load()
 	if err != nil {
@@ -661,8 +724,8 @@ func runHWID(args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		fmt.Printf("HWID: %s\nOS: Linux %s | Model: %s\n",
-			store.Settings.HWID, config.DeviceOSVersion(), config.DeviceModel())
+		fmt.Printf("HWID: %s\nOS: %s %s | Model: %s\n",
+			store.Settings.HWID, osutil.OSName(), config.DeviceOSVersion(), config.DeviceModel())
 		return nil
 	}
 	store.Settings.HWID = strings.TrimSpace(args[0])
@@ -675,7 +738,7 @@ func runHWID(args []string) error {
 
 func runParse(args []string) error {
 	if len(args) < 1 {
-		return errors.New("укажи ссылку: xray-tui parse '<uri>'")
+		return fmt.Errorf("укажи ссылку: %s parse '<uri>'", osutil.SelfName())
 	}
 	node, err := parser.ParseURI(args[0])
 	if err != nil {
@@ -723,10 +786,10 @@ func formatBytes(b int64) string {
 }
 
 func printUsage() {
-	fmt.Print(`Использование: xray-tui <команда>
-
+	fmt.Printf("Использование: %s <команда>\n", osutil.SelfName())
+	fmt.Print(`
 Прокси:
-  daemon                         Запустить фоновый демон (Unix-сокет)
+  daemon                         Запустить фоновый демон (локальный сокет)
   up [номер|имя] [-u uri] [-c f] Запустить или переключить профиль
   down                           Остановить прокси
   status                         Показать статус и активный профиль
@@ -734,17 +797,21 @@ func printUsage() {
 
 Профили и подписки:
   list                           Список всех сохранённых профилей
-  add <uri|file.json> [-name n]  Добавить ссылку или Raw JSON профиль
+  add <uri|node.json> [-name n]  Добавить ссылку, подписку или Raw JSON
   rm <номер|имя>                 Удалить профиль
   sub <add|update|list|rm>       Управление подписками
   hwid [значение]                Показать или задать HWID для подписок
   parse '<uri>'                  Разобрать ссылку и вывести JSON для xray
+
+TUN:
+  tun-setup                      Проверить права для TUN-режима
+  restart-admin                  Перезапустить демон от администратора (UAC)
 `)
 }
 
 func printSubUsage() {
-	fmt.Print(`Использование: xray-tui sub <подкоманда>
-
+	fmt.Printf("Использование: %s sub <подкоманда>\n", osutil.SelfName())
+	fmt.Print(`
   sub add <url> [-name n] [-ua ua] [-hwid id] [-no-hwid]
   sub update [номер|имя]
   sub list
@@ -772,7 +839,7 @@ func runPing(args []string) error {
 		prof = store.ActiveProfile()
 	}
 	if prof == nil {
-		return errors.New("укажи профиль или 'all': xray-tui ping <номер|имя|all>")
+		return fmt.Errorf("укажи профиль или 'all': %s ping <номер|имя|all>", osutil.SelfName())
 	}
 
 	rtt, err := measureProfilePing(store, prof)
@@ -839,33 +906,6 @@ func runPingAll(store *config.Store) error {
 	return nil
 }
 
-func runTUNSetup() error {
-	xrayPath, err := exec.LookPath("xray")
-	if err != nil {
-		return errors.New("бинарник xray не найден в PATH")
-	}
-	resolved, err := filepath.EvalSymlinks(xrayPath)
-	if err == nil {
-		xrayPath = resolved
-	}
-
-	fmt.Printf("Выдаю cap_net_admin,cap_net_raw для %s...\n", xrayPath)
-	var cmd *exec.Cmd
-	if _, err := exec.LookPath("pkexec"); err == nil && tui.HasGUI() {
-		cmd = exec.Command("pkexec", "setcap", "cap_net_admin,cap_net_raw+ep", xrayPath)
-	} else {
-		cmd = exec.Command("sudo", "setcap", "cap_net_admin,cap_net_raw+ep", xrayPath)
-	}
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("не удалось выдать права: %w", err)
-	}
-	fmt.Println("Готово. Внешние скрипты и sudoers не нужны — TUN работает напрямую через Xray.")
-	return nil
-}
-
 func runGeo(args []string) error {
 	store, err := config.Load()
 	if err != nil {
@@ -896,6 +936,7 @@ func runGeo(args []string) error {
 }
 
 func runOpen(sock string) error {
+	osutil.HideConsoleIfOwned()
 	ensureDaemonRunning(sock)
 	if !tui.HasGUI() {
 		return tui.Run(sock)
@@ -917,20 +958,35 @@ func ensureDaemonRunning(sock string) {
 		return
 	}
 
-	// 1. Пробуем поднять через systemd --user (если юнит установлен)
-	if exec.Command("systemctl", "--user", "start", "xray-tui.service").Run() == nil {
+	// 1. Пробуем поднять через автозапуск (systemd --user, если юнит установлен)
+	if autostart.Start() {
 		if waitForDaemon(client, 1500*time.Millisecond) {
 			return
 		}
 	}
 
-	// 2. Фоллбэк: запускаем демон напрямую в отвязанной фоновой сессии
+	// 2. Windows: если демона нет — поднимаем его сразу с правами администратора.
+	//    Так TUN работает без лишних действий, а сам TUI остаётся обычным
+	//    процессом в консоли пользователя. Если пользователь отклонит UAC,
+	//    ниже запустится обычный демон (прокси работает, TUN попросит права позже).
+	if osutil.TunRequiresAdmin() {
+		fmt.Fprintln(os.Stderr, "Запускаю демон с правами администратора (запрос UAC)...")
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		startErr := daemon.StartElevated(ctx, sock)
+		cancel()
+		if startErr == nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "демон с правами администратора не запущен (%v) — поднимаю обычный\n", startErr)
+	}
+
+	// 3. Фоллбэк: запускаем демон напрямую в отвязанной фоновой сессии
 	exe, err := os.Executable()
 	if err != nil {
 		return
 	}
 	cmd := exec.Command(exe, "daemon")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	osutil.Detach(cmd)
 	if devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0); err == nil {
 		cmd.Stdin = devNull
 		cmd.Stdout = devNull
@@ -940,6 +996,19 @@ func ensureDaemonRunning(sock string) {
 	if err := cmd.Start(); err == nil {
 		waitForDaemon(client, 1500*time.Millisecond)
 	}
+}
+
+// runRestartAdmin останавливает демон и поднимает его заново от администратора:
+// в Windows это нужно для TUN-режима (UAC-запрос).
+func runRestartAdmin(sock string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), osutil.ShutdownSignals()...)
+	defer stop()
+
+	if err := daemon.RestartElevated(ctx, sock); err != nil {
+		return err
+	}
+	fmt.Println("Демон перезапущен с правами администратора — TUN доступен.")
+	return nil
 }
 
 func waitForDaemon(client *ipc.Client, timeout time.Duration) bool {

@@ -2,17 +2,19 @@ package tui
 
 import (
 	"context"
-	"fmt"
-	"sort"
-	"strings"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"xray-tui/internal/config"
 	"xray-tui/internal/geo"
+	"xray-tui/internal/parser"
+	"xray-tui/internal/uiutil"
 )
 
 type routingScreen int
@@ -54,12 +56,13 @@ type providerFormState struct {
 }
 
 type jsonImportFormState struct {
-	active  bool
-	asNew   bool // true = создать новый профиль, false = импорт в текущий
-	step    int  // 0 = имя (если asNew) или режим (если !asNew), 1 = JSON или путь к файлу
-	name    string
-	replace bool
-	input   string
+	active      bool
+	asNew       bool // true = создать новый профиль, false = импорт в текущий
+	step        int  // 0 = имя (если asNew) или режим (если !asNew), 1 = JSON или путь к файлу
+	name        string
+	replace     bool
+	input       string
+	inputPasted bool
 }
 
 var ruleFieldTypes = []struct {
@@ -87,6 +90,9 @@ func (m model) inRoutingForm() bool {
 }
 
 func (m model) handleRoutingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.ruleForm.active {
+		return m.handleRuleFormKey(msg)
+	}
 	if m.jsonImportForm.active {
 		return m.handleJSONImportFormKey(msg)
 	}
@@ -328,6 +334,8 @@ func (m model) handleProfileHeaderAction(rp *config.RoutingProfile, key string) 
 		m.store.Routing.Enabled = true
 		_ = m.store.Save()
 		m.setRoutingNotice("Активный профиль: " + rp.Name)
+		// Смена активного профиля — сразу применяем к работающему прокси.
+		return m.applyRoutingNowKeep()
 	case 1:
 		strategies := []string{"AsIs", "IPIfNonMatch", "IPOnDemand"}
 		rp.DomainStrategy = cycleString(strategies, rp.DomainStrategy, rev)
@@ -596,7 +604,7 @@ func (m model) handleRuleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ruleForm.step++
 		}
 	case "ctrl+s":
-		return m.commitRuleForm(), nil
+		return m.commitRuleFormApplied()
 	case "enter":
 		if m.ruleForm.step < 3 {
 			if m.ruleForm.step == 2 && strings.TrimSpace(m.ruleForm.value) == "" {
@@ -607,7 +615,7 @@ func (m model) handleRuleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ruleForm.step++
 			return m, nil
 		}
-		return m.commitRuleForm(), nil
+		return m.commitRuleFormApplied()
 	case "tab", "right":
 		if m.ruleForm.step == 1 {
 			m.ruleForm.matchType = (m.ruleForm.matchType + 1) % len(ruleFieldTypes)
@@ -744,6 +752,30 @@ func (m model) applyRoutingNow() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// applyRoutingNowKeep делает то же, что applyRoutingNow, но не затирает уже
+// выставленное уведомление (например, «Добавлено: правило»).
+func (m model) applyRoutingNowKeep() (tea.Model, tea.Cmd) {
+	if m.status != nil && m.status.Running {
+		if active := m.store.ActiveProfile(); active != nil {
+			m.busy = true
+			m.notice += " · применяю..."
+			m.noticeErr = false
+			return m, m.connectProfileCmd(*active)
+		}
+	}
+	return m, nil
+}
+
+// commitRuleFormApplied сохраняет правило и сразу применяет конфиг к работающему
+// прокси — ручное «r» для этого больше не нужно.
+func (m model) commitRuleFormApplied() (tea.Model, tea.Cmd) {
+	m = m.commitRuleForm()
+	if m.noticeErr {
+		return m, nil
+	}
+	return m.applyRoutingNowKeep()
+}
+
 func (m *model) setRoutingNotice(base string) {
 	if m.status != nil && m.status.Running {
 		m.notice = base + " (r — применить)"
@@ -825,7 +857,7 @@ func (m model) renderProfilesList(w, h int) string {
 		leftW := termWidth(prefix) + termWidth(dot)
 		maxName := maxInt(6, w-leftW-termWidth(right)-1)
 
-		name := clipLine(rp.Name, maxName)
+		name := clipLine(uiutil.Display(rp.Name), maxName)
 		if selected {
 			name = styleCursorRow.Render(name)
 		}
@@ -1121,7 +1153,7 @@ func cycleString(list []string, cur string, reverse bool) string {
 
 func extractInputText(msg tea.KeyMsg) string {
 	if msg.Type == tea.KeyRunes {
-		return string(msg.Runes)
+		return sanitizeInput(string(msg.Runes))
 	}
 	if msg.String() == " " {
 		return " "
@@ -1283,7 +1315,7 @@ func (m model) renderJSONImportForm(w, h int) string {
 	}
 
 	// Компактное отображение, если вставлен длинный JSON-массив
-	inDisplay := strings.NewReplacer("\n", " ", "\r", "", "\t", " ").Replace(m.jsonImportForm.input)
+	inDisplay := fieldValue(m.jsonImportForm.input, m.jsonImportForm.inputPasted)
 	if r := []rune(inDisplay); len(r) > 120 {
 		inDisplay = fmt.Sprintf("[%d симв.] %s ... %s", len(r), string(r[:45]), string(r[len(r)-45:]))
 	}
@@ -1302,23 +1334,36 @@ func (m model) renderJSONImportForm(w, h int) string {
 	return padLines(lines, h)
 }
 
+func expandUserPath(p string) string {
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+
 func parseExternalRulesJSON(raw string) ([]config.RoutingRule, error) {
-	s := strings.TrimSpace(raw)
+	s := parser.NormalizeInput(raw)
 	if s == "" {
 		return nil, fmt.Errorf("вставь JSON или укажи путь к файлу")
 	}
 
 	var data []byte
-	if strings.HasPrefix(s, "[") || strings.HasPrefix(s, "{") {
+	switch {
+	case strings.HasPrefix(s, "[") || strings.HasPrefix(s, "{"):
 		data = []byte(s)
-	} else {
-		path := s
-		if strings.HasPrefix(path, "~/") {
-			if home, err := os.UserHomeDir(); err == nil {
-				path = filepath.Join(home, path[2:])
+	default:
+		path := expandUserPath(s)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			// Путь мог прийти URL-кодированным — пробуем исходную строку.
+			if alt := expandUserPath(parser.StripPasteMarkers(strings.TrimSpace(raw))); alt != path {
+				if b2, err2 := os.ReadFile(alt); err2 == nil {
+					b, err = b2, nil
+				}
 			}
 		}
-		b, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("не удалось прочитать файл: %w", err)
 		}

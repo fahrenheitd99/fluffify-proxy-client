@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -271,23 +272,89 @@ func (m model) layoutSubFormHeader(innerW int) (string, []subTabBox) {
 	return clipLine(b.String(), innerW), boxes
 }
 
+// submitAddLink — вкладка «Ключ (ссылка)»: текст разбирается умно.
 func (m model) submitAddLink() (tea.Model, tea.Cmd) {
-	raw := strings.TrimSpace(m.subForm.link)
+	if strings.TrimSpace(m.subForm.link) == "" {
+		m.notice = "Вставь ссылку (vless://, hy2://, trojan://) или JSON"
+		m.noticeErr = true
+		return m, nil
+	}
+	return m.applySmartInput(m.subForm.link)
+}
+
+// applySmartInput — единая точка входа для вставленного текста: определяет,
+// это подписка, ключ, JSON или файл, и выполняет нужное действие.
+func (m model) applySmartInput(text string) (tea.Model, tea.Cmd) {
+	kind, value := parser.ClassifyInput(text)
+	switch kind {
+	case parser.InputSubscription:
+		return m.addSubscription(value)
+	case parser.InputLink:
+		return m.addLinks(value)
+	case parser.InputJSON:
+		return m.addJSONNode(value)
+	case parser.InputFilePath:
+		if data, err := os.ReadFile(value); err == nil {
+			return m.applySmartInput(string(data))
+		}
+		if len(parser.TotalLines(value)) > 1 {
+			return m.addLinks(value)
+		}
+		m.notice = "Не понял ввод: это не ссылка, не JSON и не существующий файл"
+		m.noticeErr = true
+		return m, nil
+	default:
+		m.notice = "Пустой ввод"
+		m.noticeErr = true
+		return m, nil
+	}
+}
+
+// addSubscription создаёт подписку и запускает её загрузку.
+func (m model) addSubscription(rawURL string) (tea.Model, tea.Cmd) {
+	u := strings.TrimSpace(rawURL)
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+		m.notice = "URL должен начинаться с http:// или https://"
+		m.noticeErr = true
+		return m, nil
+	}
+
+	sub := config.Subscription{
+		ID:       config.NewID(),
+		Name:     strings.TrimSpace(m.subForm.name),
+		URL:      u,
+		SendHWID: m.subForm.sendHWID,
+	}
+	m.store.Subscriptions = append(m.store.Subscriptions, sub)
+	if err := m.store.Save(); err != nil {
+		m.notice = "Ошибка сохранения: " + err.Error()
+		m.noticeErr = true
+		return m, nil
+	}
+
+	idx := len(m.store.Subscriptions) - 1
+	m.subForm = subFormState{}
+	m.busy = true
+	m.notice = "Загружаю подписку..."
+	m.noticeErr = false
+	return m, m.syncSubsCmd(idx)
+}
+
+func (m model) addLinks(text string) (tea.Model, tea.Cmd) {
+	raw := strings.TrimSpace(text)
 	if raw == "" {
 		m.notice = "Вставь ссылку (vless://, hy2://, trojan:// и т.д.)"
 		m.noticeErr = true
 		return m, nil
 	}
 
-	lines := strings.FieldsFunc(raw, func(r rune) bool {
-		return r == '\n' || r == '\r'
-	})
+	lines := parser.TotalLines(raw)
 
 	added := 0
 	var lastErr error
 	var lastName string
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
+		line = parser.NormalizeInput(line)
 		if line == "" {
 			continue
 		}
@@ -341,8 +408,18 @@ func (m model) submitAddLink() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// submitAddJSON — вкладка «JSON ноды»: принимает и JSON, и ссылку, и файл.
 func (m model) submitAddJSON() (tea.Model, tea.Cmd) {
-	raw := []byte(strings.TrimSpace(m.subForm.rawJSON))
+	if strings.TrimSpace(m.subForm.rawJSON) == "" {
+		m.notice = "Вставь JSON конфиг или outbound-ноду"
+		m.noticeErr = true
+		return m, nil
+	}
+	return m.applySmartInput(m.subForm.rawJSON)
+}
+
+func (m model) addJSONNode(text string) (tea.Model, tea.Cmd) {
+	raw := []byte(strings.TrimSpace(text))
 	if len(raw) == 0 {
 		m.notice = "Вставь JSON конфиг или outbound-ноду"
 		m.noticeErr = true

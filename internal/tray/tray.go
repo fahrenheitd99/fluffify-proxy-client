@@ -2,6 +2,7 @@ package tray
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -11,45 +12,28 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"fyne.io/systray"
 
+	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
+	"xray-tui/internal/daemon"
 	"xray-tui/internal/generator"
 	"xray-tui/internal/ipc"
+	"xray-tui/internal/osutil"
+	"xray-tui/internal/uiutil"
 )
 
-func lockFilePath() string {
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		dir = os.TempDir()
-	}
-	return filepath.Join(dir, "fluffify-tray.lock")
-}
-
-func acquireTrayLock() (*os.File, bool) {
-	f, err := os.OpenFile(lockFilePath(), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, false
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		return nil, false
-	}
-	return f, true
-}
+const trayLockName = "fluffify-tray"
 
 // EnsureRunning запускает иконку трея в отвязанной фоновой сессии, если она ещё не запущена.
 func EnsureRunning() {
-	if f, ok := acquireTrayLock(); !ok {
+	if unlock, ok := osutil.TryLock(trayLockName); !ok {
 		return // трей уже работает
 	} else {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
+		unlock()
 	}
 
 	exe, err := os.Executable()
@@ -57,45 +41,94 @@ func EnsureRunning() {
 		return
 	}
 	cmd := exec.Command(exe, "tray")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	osutil.Detach(cmd)
 	_ = cmd.Start()
 }
 
 func Run(socketPath string) {
-	lock, ok := acquireTrayLock()
+	osutil.HideConsole()
+
+	unlock, ok := osutil.TryLock(trayLockName)
 	if !ok {
 		return
 	}
-	defer func() {
-		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		_ = lock.Close()
-	}()
+	defer unlock()
+
+	ensureDaemon(socketPath)
 
 	systray.Run(func() {
 		onReady(socketPath)
 	}, func() {})
 }
 
-type nodeMenuEntry struct {
-	profile config.Profile
-	item    *systray.MenuItem
-	checked bool
+func ensureDaemon(socketPath string) {
+	client := ipc.NewClient(socketPath)
+	if _, err := client.Status(); err == nil {
+		return
+	}
+	if autostart.Start() && waitForDaemon(client, 1500*time.Millisecond) {
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(exe, "daemon")
+	osutil.Detach(cmd)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	waitForDaemon(client, 1500*time.Millisecond)
 }
 
-type routingMenuEntry struct {
-	id      string
-	item    *systray.MenuItem
-	checked bool
+func waitForDaemon(client *ipc.Client, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := client.Status(); err == nil {
+			return true
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false
 }
 
-const maxMenuChunk = 9999
+// Пункты меню создаются один раз и переиспользуются: fyne/systray не даёт
+// надёжно добавлять их на ходу, а так список обновляется без перезапуска трея.
+const (
+	maxServerSlots  = 40
+	maxRoutingSlots = 20
+)
+
+// profilesForMenu задаёт порядок серверов в меню: локальные ноды, затем ноды
+// каждой подписки. syncUI и обработчик клика используют его одинаково.
+func profilesForMenu(store *config.Store) []config.Profile {
+	if store == nil {
+		return nil
+	}
+	out := make([]config.Profile, 0, len(store.Profiles))
+	for _, p := range store.Profiles {
+		if p.SubID == "" {
+			out = append(out, p)
+		}
+	}
+	for _, sub := range store.Subscriptions {
+		for _, p := range store.Profiles {
+			if p.SubID == sub.ID {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
 
 func onReady(socketPath string) {
 	client := ipc.NewClient(socketPath)
 
-	kdeGlobalsPath := filepath.Join(userHomeDir(), ".config", "kdeglobals")
-	lastKdeMod := fileModTime(kdeGlobalsPath)
-	accentHex := readKDEAccentColor(kdeGlobalsPath)
+	accentPath := trayAccentPath()
+	lastAccentMod := fileModTime(accentPath)
+	accentHex := trayAccent()
+	themeNow := trayTheme()
 	iconOff, iconOn, iconErr := buildTrayIcons(accentHex)
 
 	systray.SetIcon(iconOff)
@@ -108,80 +141,29 @@ func onReady(socketPath string) {
 	systray.AddSeparator()
 	mToggle := systray.AddMenuItem("Подключить", "Включить или выключить VPN")
 	mOpen := systray.AddMenuItem("Открыть Fluffify", "Открыть TUI в терминале")
+	mReconnect := systray.AddMenuItem("Переподключить", "Перезапустить Xray с текущим конфигом")
 
-	initStore, _ := config.Load()
-
-	// Подменю выбора серверов (сгруппировано по подпискам)
 	mServers := systray.AddMenuItem("Серверы", "Выбрать и подключить ноду")
-	selectProfCh := make(chan config.Profile, 4)
-	var nodeItems []nodeMenuEntry
-
-	addNodeItem := func(parent *systray.MenuItem, prof config.Profile) {
-		mi := parent.AddSubMenuItemCheckbox(prof.Name, "", false)
-		nodeItems = append(nodeItems, nodeMenuEntry{profile: prof, item: mi})
-		go func(p config.Profile, item *systray.MenuItem) {
+	// Серверы. fyne/systray не позволяет надёжно добавлять пункты на ходу,
+	// поэтому создаём пул и переиспользуем его: названия, видимость и отметку
+	// активного сервера обновляет syncUI. Порядок пунктов = profilesForMenu.
+	selectProfSlotCh := make(chan int, 4)
+	serverSlots := make([]*systray.MenuItem, maxServerSlots)
+	serverTitles := make([]string, maxServerSlots)
+	serverChecked := make([]bool, maxServerSlots)
+	for i := range serverSlots {
+		item := mServers.AddSubMenuItemCheckbox("—", "", false)
+		item.Hide()
+		item.Disable()
+		serverSlots[i] = item
+		go func(idx int, item *systray.MenuItem) {
 			for range item.ClickedCh {
-				selectProfCh <- p
+				selectProfSlotCh <- idx
 			}
-		}(prof, mi)
+		}(i, item)
 	}
-
-	if initStore != nil && len(initStore.Profiles) > 0 {
-		type group struct {
-			title    string
-			profiles []config.Profile
-		}
-		var groups []group
-
-		var local []config.Profile
-		for _, p := range initStore.Profiles {
-			if p.SubID == "" {
-				local = append(local, p)
-			}
-		}
-		if len(local) > 0 {
-			groups = append(groups, group{title: "Ноды", profiles: local})
-		}
-
-		for _, sub := range initStore.Subscriptions {
-			var list []config.Profile
-			for _, p := range initStore.Profiles {
-				if p.SubID == sub.ID {
-					list = append(list, p)
-				}
-			}
-			if len(list) > 0 {
-				groups = append(groups, group{title: sub.Name, profiles: list})
-			}
-		}
-
-		for _, g := range groups {
-			parent := mServers
-			if len(groups) > 1 {
-				parent = mServers.AddSubMenuItem(fmt.Sprintf("%s (%d)", g.title, len(g.profiles)), "")
-			}
-
-			if len(g.profiles) <= maxMenuChunk {
-				for _, prof := range g.profiles {
-					addNodeItem(parent, prof)
-				}
-			} else {
-				for start := 0; start < len(g.profiles); start += maxMenuChunk {
-					end := start + maxMenuChunk
-					if end > len(g.profiles) {
-						end = len(g.profiles)
-					}
-					chunkMenu := parent.AddSubMenuItem(fmt.Sprintf("%d–%d", start+1, end), "")
-					for _, prof := range g.profiles[start:end] {
-						addNodeItem(chunkMenu, prof)
-					}
-				}
-			}
-		}
-	} else {
-		empty := mServers.AddSubMenuItem("Нет серверов", "")
-		empty.Disable()
-	}
+	mNoServers := mServers.AddSubMenuItem("Нет серверов — добавь в Fluffify", "")
+	mNoServers.Disable()
 
 	// Подменю выбора профиля правил роутинга
 	mRouting := systray.AddMenuItem("Роутинг", "Выбрать профиль правил роутинга")
@@ -194,23 +176,33 @@ func onReady(socketPath string) {
 		}
 	}()
 
-	var routingItems []routingMenuEntry
-	if initStore != nil {
-		for _, rp := range initStore.Routing.Profiles {
-			mi := mRouting.AddSubMenuItemCheckbox(rp.Name, "", false)
-			routingItems = append(routingItems, routingMenuEntry{id: rp.ID, item: mi})
-			go func(id string, item *systray.MenuItem) {
-				for range item.ClickedCh {
-					selectRoutingCh <- id
-				}
-			}(rp.ID, mi)
-		}
+	// Профили роутинга — такой же пул: их список тоже может поменяться в TUI.
+	selectRoutingIdxCh := make(chan int, 4)
+	routeSlots := make([]*systray.MenuItem, maxRoutingSlots)
+	routeTitles := make([]string, maxRoutingSlots)
+	routeChecked := make([]bool, maxRoutingSlots)
+	for i := range routeSlots {
+		item := mRouting.AddSubMenuItemCheckbox("—", "", false)
+		item.Hide()
+		item.Disable()
+		routeSlots[i] = item
+		go func(idx int, item *systray.MenuItem) {
+			for range item.ClickedCh {
+				selectRoutingIdxCh <- idx
+			}
+		}(i, item)
 	}
 
 	systray.AddSeparator()
 	mMode := systray.AddMenuItem("Режим", "Переключить TUN / Proxy")
 	mModeTUN := mMode.AddSubMenuItemCheckbox("TUN", "Системный TUN", false)
 	mModeProxy := mMode.AddSubMenuItemCheckbox("Proxy", "Локальный SOCKS/HTTP", false)
+
+	// Перезапуск демона с правами администратора: в Windows без этого TUN
+	// не поднять (виртуальный адаптер создаёт только админ).
+	mElevate := systray.AddMenuItem("Демон от администратора",
+		"Перезапустить демон с правами администратора — нужно для TUN (запрос UAC)")
+	elevateCh := make(chan error, 1)
 
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Выйти", "Остановить демон, Xray и закрыть Fluffify")
@@ -235,15 +227,28 @@ func onReady(socketPath string) {
 		}
 	}
 
+	// actionErr — последняя ошибка действия (подключение, TUN): показываем её,
+	// пока операция не завершится успешно.
+	actionErr := ""
+
 	syncUI := func() {
-		// Живое обновление цвета при смене акцента в настройках KDE Plasma
-		if mod := fileModTime(kdeGlobalsPath); !mod.Equal(lastKdeMod) {
-			lastKdeMod = mod
-			if curAccent := readKDEAccentColor(kdeGlobalsPath); curAccent != accentHex {
-				accentHex = curAccent
-				iconOff, iconOn, iconErr = buildTrayIcons(accentHex)
-				lastIconState = ""
+		// Живое обновление цвета при смене акцента (KDE Plasma; на Windows путь пуст)
+		if accentPath != "" {
+			if mod := fileModTime(accentPath); !mod.Equal(lastAccentMod) {
+				lastAccentMod = mod
+				if curAccent := trayAccent(); curAccent != accentHex {
+					accentHex = curAccent
+					iconOff, iconOn, iconErr = buildTrayIcons(accentHex)
+					lastIconState = ""
+				}
 			}
+		}
+
+		// На Windows переключение светлой/тёмной темы меняет нейтральную иконку.
+		if cur := trayTheme(); cur != themeNow {
+			themeNow = cur
+			iconOff, iconOn, iconErr = buildTrayIcons(accentHex)
+			lastIconState = ""
 		}
 
 		st, err := client.Status()
@@ -256,20 +261,63 @@ func onReady(socketPath string) {
 			setCheckbox(mModeProxy, &modeProxyChecked, store.Settings.Mode != config.ModeTUN)
 
 			setCheckbox(mRoutingOff, &routingOffChecked, !store.Routing.Enabled)
-			for i := range routingItems {
-				want := store.Routing.Enabled && routingItems[i].id == store.Routing.ActiveProfileID
-				setCheckbox(routingItems[i].item, &routingItems[i].checked, want)
+			for i, item := range routeSlots {
+				if i >= len(store.Routing.Profiles) {
+					if routeTitles[i] != "" {
+						routeTitles[i] = ""
+						item.SetTitle("—")
+					}
+					item.Disable()
+					item.Hide()
+					continue
+				}
+				title := uiutil.Display(store.Routing.Profiles[i].Name)
+				if routeTitles[i] != title {
+					routeTitles[i] = title
+					item.SetTitle(title)
+				}
+				item.Enable()
+				item.Show()
+				want := store.Routing.Enabled && store.Routing.Profiles[i].ID == store.Routing.ActiveProfileID
+				setCheckbox(item, &routeChecked[i], want)
 			}
-		}
+			// Пункты серверов обновляем на ходу: после добавления нод в TUI меню
+			// перечитывается без перезапуска трея.
+			list := profilesForMenu(store)
+			if len(list) == 0 {
+				mNoServers.Enable()
+			} else {
+				mNoServers.Disable()
+			}
+			for i, item := range serverSlots {
+				if i >= len(list) {
+					if serverTitles[i] != "" {
+						serverTitles[i] = ""
+						item.SetTitle("—")
+					}
+					item.Disable()
+					item.Hide()
+					continue
+				}
+				title := uiutil.Display(list[i].Name)
+				if strings.TrimSpace(title) == "" {
+					title = list[i].Address
+				}
+				if serverTitles[i] != title {
+					serverTitles[i] = title
+					item.SetTitle(title)
+				}
+				item.Enable()
+				item.Show()
 
-		for i := range nodeItems {
-			want := false
-			if st != nil && st.Running {
-				want = nodeItems[i].profile.Name == st.Profile
-			} else if activeID != "" {
-				want = nodeItems[i].profile.ID == activeID
+				want := false
+				if st != nil && st.Running {
+					want = list[i].Name == st.Profile
+				} else if activeID != "" {
+					want = list[i].ID == activeID
+				}
+				setCheckbox(item, &serverChecked[i], want)
 			}
-			setCheckbox(nodeItems[i].item, &nodeItems[i].checked, want)
 		}
 
 		var wantIcon, wantTooltip, wantStatus, wantToggle string
@@ -279,8 +327,13 @@ func onReady(socketPath string) {
 			wantTooltip = "Fluffify — нет связи с демоном"
 			wantStatus = "✕ Демон не запущен"
 			wantToggle = "Подключить"
+		case actionErr != "":
+			wantIcon = "err"
+			wantTooltip = "Fluffify — " + actionErr
+			wantStatus = "✕ Ошибка"
+			wantToggle = "Подключить"
 		case st != nil && st.Running:
-			name := st.Profile
+			name := uiutil.Display(st.Profile)
 			if name == "" {
 				name = "active"
 			}
@@ -324,6 +377,7 @@ func onReady(socketPath string) {
 	connectProfile := func(prof *config.Profile) {
 		store, err := config.Load()
 		if err != nil {
+			actionErr = "не удалось прочитать настройки: " + err.Error()
 			return
 		}
 		if prof == nil {
@@ -333,10 +387,12 @@ func onReady(socketPath string) {
 			prof = &store.Profiles[0]
 		}
 		if prof == nil {
+			actionErr = "нет ни одного сервера — добавь подписку или ключ"
 			return
 		}
 		res, err := generator.BuildForProfile(store, prof)
 		if err != nil {
+			actionErr = err.Error()
 			return
 		}
 		_, err = client.Start(ipc.StartRequest{
@@ -353,6 +409,9 @@ func onReady(socketPath string) {
 		if err == nil {
 			store.Settings.ActiveProfileID = prof.ID
 			_ = store.Save()
+			actionErr = ""
+		} else {
+			actionErr = err.Error()
 		}
 	}
 
@@ -396,6 +455,15 @@ func onReady(socketPath string) {
 	syncUI()
 
 	go func() {
+		for range mElevate.ClickedCh {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			err := daemon.RestartElevated(ctx, socketPath)
+			cancel()
+			elevateCh <- err
+		}
+	}()
+
+	go func() {
 		ticker := time.NewTicker(1500 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -407,19 +475,49 @@ func onReady(socketPath string) {
 			case <-mToggle.ClickedCh:
 				st, err := client.Status()
 				if err == nil && st != nil && st.Running {
-					_, _ = client.Stop()
+					if _, stopErr := client.Stop(); stopErr == nil {
+						actionErr = ""
+					} else {
+						actionErr = stopErr.Error()
+					}
 				} else {
 					connectProfile(nil)
 				}
 				syncUI()
 
-			case prof := <-selectProfCh:
-				p := prof
-				connectProfile(&p)
+			case err := <-elevateCh:
+				if err != nil {
+					actionErr = err.Error()
+				} else {
+					actionErr = ""
+				}
+				syncUI()
+
+			case <-mReconnect.ClickedCh:
+				// Мягкий перезапуск Xray: конфиг заново собирается из store,
+				// поэтому свежие ноды и правила подхватываются сразу.
+				connectProfile(nil)
+				syncUI()
+
+			case slot := <-selectProfSlotCh:
+				// Список читаем заново: сервера могли добавить в TUI,
+				// пока трей работал.
+				if store, loadErr := config.Load(); loadErr == nil {
+					if list := profilesForMenu(store); slot >= 0 && slot < len(list) {
+						prof := list[slot]
+						connectProfile(&prof)
+					}
+				}
 				syncUI()
 
 			case rpID := <-selectRoutingCh:
 				setRouting(rpID)
+
+			case slot := <-selectRoutingIdxCh:
+				if store, loadErr := config.Load(); loadErr == nil &&
+					slot >= 0 && slot < len(store.Routing.Profiles) {
+					setRouting(store.Routing.Profiles[slot].ID)
+				}
 
 			case <-mOpen.ClickedCh:
 				openTUIWindow()
@@ -441,7 +539,7 @@ func onReady(socketPath string) {
 func openTUIWindow() {
 	exe, err := os.Executable()
 	if err != nil {
-		exe = "xray-tui"
+		exe = osutil.SelfName()
 	}
 	cmd := exec.Command(exe, "open")
 	_ = cmd.Start()
@@ -455,30 +553,6 @@ var (
 	reCurrentColorAttr = regexp.MustCompile(`(?i)fill\s*=\s*"currentColor"`)
 	reWhiteFillCSS     = regexp.MustCompile(`(?i)fill\s*:\s*#(?:ffffff|fff)\b`)
 )
-
-func buildTrayIcons(accentHex string) (offPNG, onPNG, errPNG []byte) {
-	svgRaw := loadSymbolicSVG()
-
-	if b := renderSVGToPNG(colorizeSVG(svgRaw, accentHex, 1.0)); len(b) > 0 {
-		onPNG = b
-	} else {
-		onPNG = makeFallbackIconPNG("on")
-	}
-
-	if b := renderSVGToPNG(colorizeSVG(svgRaw, "#5c5c68", 1.0)); len(b) > 0 {
-		offPNG = b
-	} else {
-		offPNG = makeFallbackIconPNG("off")
-	}
-
-	if b := renderSVGToPNG(colorizeSVG(svgRaw, "#e04856", 1.0)); len(b) > 0 {
-		errPNG = b
-	} else {
-		errPNG = makeFallbackIconPNG("err")
-	}
-
-	return offPNG, onPNG, errPNG
-}
 
 func loadSymbolicSVG() []byte {
 	home := userHomeDir()
@@ -550,83 +624,6 @@ func renderSVGToPNG(svgBytes []byte) []byte {
 	return nil
 }
 
-// readKDEAccentColor извлекает системный акцентный цвет из ~/.config/kdeglobals.
-func readKDEAccentColor(path string) string {
-	const fallback = "#3daee9"
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fallback
-	}
-
-	var generalAccent, selectionBg, viewActive string
-	section := ""
-
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.TrimSpace(line[1 : len(line)-1])
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-
-		switch {
-		case section == "General" && k == "AccentColor":
-			generalAccent = v
-		case section == "Colors:Selection" && k == "BackgroundNormal":
-			selectionBg = v
-		case section == "Colors:View" && k == "ForegroundActive":
-			viewActive = v
-		}
-	}
-
-	for _, raw := range []string{generalAccent, selectionBg, viewActive} {
-		if hex := parseKDEColorToHex(raw); hex != "" {
-			return hex
-		}
-	}
-	return fallback
-}
-
-func parseKDEColorToHex(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	if strings.HasPrefix(raw, "#") {
-		h := raw[1:]
-		if len(h) == 6 {
-			return "#" + h
-		}
-		if len(h) == 8 {
-			return "#" + h[2:]
-		}
-		return ""
-	}
-
-	parts := strings.Split(raw, ",")
-	if len(parts) < 3 {
-		return ""
-	}
-	r, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-	g, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
-	b, err3 := strconv.Atoi(strings.TrimSpace(parts[2]))
-	if err1 != nil || err2 != nil || err3 != nil {
-		return ""
-	}
-	if r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255 {
-		return ""
-	}
-	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
-}
-
 func userHomeDir() string {
 	if h, err := os.UserHomeDir(); err == nil {
 		return h
@@ -679,7 +676,7 @@ func makeFallbackIconPNG(state string) []byte {
 			case "on":
 				c = color.NRGBA{R: 61, G: 174, B: 233, A: 255}
 			case "err":
-				c = color.NRGBA{R: 220, G: 55, B: 70, A: 255}
+				c = color.NRGBA{R: 255, G: 0, B: 0, A: 255}
 			default:
 				c = color.NRGBA{R: 92, G: 92, B: 104, A: 255}
 			}
@@ -714,8 +711,8 @@ func shutdownAll(client *ipc.Client) {
 		_, _ = client.Stop()
 	}
 
-	// Штатно останавливаем systemd-юнит, чтобы systemd не перезапустил демон
-	_ = exec.Command("systemctl", "--user", "stop", "xray-tui.service").Run()
+	// Штатно останавливаем автозапуск, чтобы systemd не перезапустил демон
+	autostart.Stop()
 
 	// Завершаем оставшиеся процессы этого бинарника (ручной daemon и открытые окна TUI)
 	terminateSiblingProcs()
@@ -725,48 +722,4 @@ func shutdownAll(client *ipc.Client) {
 		os.Exit(0)
 	})
 	systray.Quit()
-}
-
-func terminateSiblingProcs() {
-	myPID := os.Getpid()
-	exe, _ := os.Executable()
-	selfBase := filepath.Base(exe)
-	if selfBase == "" || selfBase == "." {
-		selfBase = "xray-tui"
-	}
-
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return
-	}
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 1 || pid == myPID {
-			continue
-		}
-
-		matched := false
-		if target, err := os.Readlink(filepath.Join("/proc", e.Name(), "exe")); err == nil {
-			clean := strings.TrimSuffix(target, " (deleted)")
-			if (exe != "" && clean == exe) || filepath.Base(clean) == selfBase {
-				matched = true
-			}
-		}
-		if !matched {
-			if raw, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline")); err == nil && len(raw) > 0 {
-				parts := strings.Split(string(raw), "\x00")
-				if len(parts) > 0 && filepath.Base(parts[0]) == selfBase {
-					matched = true
-				}
-			}
-		}
-
-		if matched {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-		}
-	}
 }

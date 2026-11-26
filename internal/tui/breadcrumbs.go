@@ -2,6 +2,8 @@ package tui
 
 import (
 	"strings"
+
+	"xray-tui/internal/uiutil"
 )
 
 type breadcrumb struct {
@@ -105,7 +107,7 @@ func (m model) breadcrumbs() []breadcrumb {
 			profName := "Профиль"
 			if m.routingEditIdx >= 0 && m.routingEditIdx < len(m.store.Routing.Profiles) {
 				if n := strings.TrimSpace(m.store.Routing.Profiles[m.routingEditIdx].Name); n != "" {
-					profName = n
+					profName = uiutil.Display(n)
 				}
 			}
 			items = append(items, breadcrumb{

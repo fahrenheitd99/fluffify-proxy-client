@@ -2,9 +2,6 @@ package ipc
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -31,6 +28,8 @@ type StatusResponse struct {
 	ProxyAuth bool      `json:"proxy_auth,omitempty"`
 	StartedAt time.Time `json:"started_at,omitempty"`
 	UptimeSec int64     `json:"uptime_sec"`
+	// Elevated — запущен ли демон с правами администратора (нужно для TUN).
+	Elevated bool `json:"elevated"`
 }
 
 type LogsResponse struct {
@@ -41,9 +40,7 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
+// DefaultSocketPath возвращает путь к сокету демона для текущей платформы.
 func DefaultSocketPath() string {
-	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
-		return filepath.Join(dir, "xray-tui", "daemon.sock")
-	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("xray-tui-%d", os.Getuid()), "daemon.sock")
+	return defaultSocketPath()
 }

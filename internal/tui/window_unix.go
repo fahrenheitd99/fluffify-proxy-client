@@ -1,3 +1,5 @@
+//go:build !windows
+
 package tui
 
 import (
@@ -5,7 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
+
+	"xray-tui/internal/osutil"
 )
 
 func HasGUI() bool {
@@ -84,7 +87,7 @@ func LaunchWindow(cols, lines int, preferredTerm string) error {
 	}
 
 	cmd := exec.Command(termPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	osutil.Detach(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("не удалось открыть окно %s: %w", termName, err)
 	}

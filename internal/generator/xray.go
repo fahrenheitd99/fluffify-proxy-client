@@ -2,6 +2,7 @@ package generator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -73,6 +74,29 @@ func OptionsFromStore(store *config.Store) Options {
 	}
 }
 
+// routingNeedsGeoDocs сообщает, ссылается ли профиль на категории geosite/geoip,
+// для которых нужны файлы геобаз. Категория «private» встроена в Xray и файлов
+// не требует, поэтому с ней сборка конфига не блокируется.
+func routingNeedsGeoDocs(rp *config.RoutingProfile) bool {
+	for _, rule := range rp.Rules {
+		for _, list := range [][]string{rule.Domains, rule.IPs} {
+			for _, value := range list {
+				prefix, category, ok := strings.Cut(value, ":")
+				if !ok {
+					continue
+				}
+				switch strings.ToLower(prefix) {
+				case "geosite", "geoip":
+					if !strings.EqualFold(category, "private") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
 func BuildForProfile(store *config.Store, prof *config.Profile) (*BuildResult, error) {
 	opts := OptionsFromStore(store)
 
@@ -81,6 +105,8 @@ func BuildForProfile(store *config.Store, prof *config.Profile) (*BuildResult, e
 		dir := config.GeoProviderDir(opts.RoutingProfile.GeoProviderID)
 		if geo.Check(dir).Ready() {
 			assetDir = dir
+		} else if routingNeedsGeoDocs(opts.RoutingProfile) {
+			return nil, errors.New("геобазы не скачаны: открой профиль роутинга и скачай их (пункт «Файлы геобаз»)")
 		}
 	}
 

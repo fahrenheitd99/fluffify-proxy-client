@@ -18,34 +18,34 @@ const (
 	ProfileTypeURI = "uri"
 	ProfileTypeRaw = "raw"
 
-	ModeProxy = "proxy"
-	ModeTUN   = "tun"
+	ModeProxy     = "proxy"
+	ModeTUN       = "tun"
 	UIModeKeys    = "keys"
 	UIModeButtons = "buttons"
 
 	PingModeProxyHEAD = "proxy_head"
 	PingModeTCP       = "tcping"
-	PingModeICMP 	  = "icmp"
+	PingModeICMP      = "icmp"
 
 	DefaultGeoProviderID = "fahrenheitd99"
 	DefaultPingURL       = "https://cp.cloudflare.com/generate_204"
-    
-    ThemeSystem       = "system"
+
+	ThemeSystem       = "system"
 	ThemeDefaultDark  = "default_dark"
 	ThemeDefaultLight = "default_light"
 	ThemeGruvbox      = "gruvbox"
 	ThemeOwo          = "owo"
-	ThemeUwu 		  = "uwu"
+	ThemeUwu          = "uwu"
 	ThemeGTAVI        = "gta_vi"
-	ThemeHackerBlue  = "hacker_blue"
-	ThemeHackerGreen = "hacker_green"
-	ThemeHackerRed   = "hacker_red"
-	ThemeAmberCRT    = "amber_crt"
-	ThemePhosphorCRT = "phosphor_crt"
-	ThemeMatchaDark  = "matcha_dark"
-	ThemeMatchaLight = "matcha_light"
-	ThemeLavender    = "lavender"
-	ThemePeach       = "peach"
+	ThemeHackerBlue   = "hacker_blue"
+	ThemeHackerGreen  = "hacker_green"
+	ThemeHackerRed    = "hacker_red"
+	ThemeAmberCRT     = "amber_crt"
+	ThemePhosphorCRT  = "phosphor_crt"
+	ThemeMatchaDark   = "matcha_dark"
+	ThemeMatchaLight  = "matcha_light"
+	ThemeLavender     = "lavender"
+	ThemePeach        = "peach"
 	ThemePaleLavender = "pale_lavender"
 
 	AccentRed    = "red"
@@ -55,10 +55,10 @@ const (
 	AccentCyan   = "cyan"
 	AccentBlue   = "blue"
 	AccentViolet = "violet"
-	AccentPink  = "pink"
-	AccentBrown = "brown"
-	AccentWhite = "white"
-	AccentBlack = "black"
+	AccentPink   = "pink"
+	AccentBrown  = "brown"
+	AccentWhite  = "white"
+	AccentBlack  = "black"
 )
 
 var PresetPingURLs = []string{
@@ -231,28 +231,6 @@ func DefaultRoutingRules() []RoutingRule {
 	}
 }
 
-func ConfigDir() string {
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "xray-tui")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".xray-tui"
-	}
-	return filepath.Join(home, ".config", "xray-tui")
-}
-
-func GeoBaseDir() string {
-	if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
-		return filepath.Join(dir, "xray-tui", "geo")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".xray-tui-geo"
-	}
-	return filepath.Join(home, ".local", "share", "xray-tui", "geo")
-}
-
 func GeoProviderDir(providerID string) string {
 	if providerID == "" {
 		providerID = DefaultGeoProviderID
@@ -373,7 +351,7 @@ func (s *Store) applyDefaults() {
 			s.Routing.Profiles[i].GeoProviderID = s.Routing.GeoProviders[0].ID
 		}
 	}
-	
+
 	if s.Settings.Theme == "" {
 		s.Settings.Theme = ThemeSystem
 	}
@@ -557,10 +535,7 @@ func NewID() string {
 }
 
 func GenerateHWID() string {
-	var seed string
-	if raw, err := os.ReadFile("/etc/machine-id"); err == nil {
-		seed = strings.TrimSpace(string(raw))
-	}
+	seed := machineSeed()
 	if seed == "" {
 		seed, _ = os.Hostname()
 	}
@@ -575,15 +550,12 @@ func RandomHWID() string {
 }
 
 func DeviceOSVersion() string {
-	if raw, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
-		return strings.TrimSpace(string(raw))
-	}
-	return "unknown"
+	return osVersion()
 }
 
 func DeviceModel() string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
 	}
-	return "linux-pc"
+	return defaultDeviceModel()
 }

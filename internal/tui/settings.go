@@ -2,9 +2,7 @@ package tui
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -12,7 +10,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
+	"xray-tui/internal/osutil"
+	"xray-tui/internal/parser"
+	"xray-tui/internal/uiutil"
 )
 
 type settingsFormKind int
@@ -28,12 +30,13 @@ const (
 )
 
 type settingsFormState struct {
-	kind    settingsFormKind
-	step    int
-	value   string
-	enabled bool
-	user    string
-	pass    string
+	kind        settingsFormKind
+	step        int
+	value       string
+	valuePasted bool
+	enabled     bool
+	user        string
+	pass        string
 }
 
 const totalSettingsItems = 20
@@ -94,7 +97,7 @@ func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.store.Save()
 			return m.reconnectIfRunning("Режим работы: " + modeLabel(m.store.Settings.Mode))
 
-			case 1: // Тип пинга
+		case 1: // Тип пинга
 			modes := []string{config.PingModeICMP, config.PingModeProxyHEAD}
 			m.store.Settings.PingMode = cycleString(modes, m.store.Settings.PingMode, rev)
 			_ = m.store.Save()
@@ -166,10 +169,10 @@ func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.notice = "URL пинга: " + shortPingURL(m.store.Settings.PingURL)
 			m.noticeErr = false
 
-		case 13: // Автозапуск при старте системы (systemd --user)
+		case 13: // Автозапуск при старте системы
 			target := !m.autostartEnabled
-			if err := setSystemdAutostart(target); err != nil {
-				m.notice = "Ошибка systemd: " + err.Error()
+			if err := autostart.Set(target); err != nil {
+				m.notice = "Ошибка автозапуска: " + err.Error()
 				m.noticeErr = true
 			} else {
 				m.autostartEnabled = target
@@ -281,7 +284,7 @@ func (m model) handleSettingsFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case sFormPingURL:
 		switch key {
 		case "enter":
-			u := strings.TrimSpace(m.settingsForm.value)
+			u := parser.NormalizeInput(m.settingsForm.value)
 			if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 				m.notice = "URL должен начинаться с http:// или https://"
 				m.noticeErr = true
@@ -412,7 +415,7 @@ func (m model) renderSettings(w, h int) string {
 	routingVal := "Выкл →"
 	if m.store.Routing.Enabled {
 		if rp := m.store.ActiveRoutingProfile(); rp != nil {
-			routingVal = clipLine(rp.Name, 14) + " →"
+			routingVal = clipLine(uiutil.Display(rp.Name), 14) + " →"
 		} else {
 			routingVal = "Вкл →"
 		}
@@ -506,14 +509,14 @@ func (m model) renderSettingsForm(w, h int) string {
 		rows = append(rows, wrapField("Порт (0=выкл)", m.settingsForm.value+bar, true, innerW)...)
 	case sFormPingURL:
 		title = "URL для via proxy HEAD"
-		rows = append(rows, wrapField("URL", m.settingsForm.value+bar, true, innerW)...)
+		rows = append(rows, wrapField("URL", fieldValue(m.settingsForm.value, m.settingsForm.valuePasted)+bar, true, innerW)...)
 	case sFormHWID:
 		title = "Кастомный HWID"
-		rows = append(rows, wrapField("HWID", m.settingsForm.value+bar, true, innerW)...)
+		rows = append(rows, wrapField("HWID", fieldValue(m.settingsForm.value, m.settingsForm.valuePasted)+bar, true, innerW)...)
 		rows = append(rows, clipLine(styleMuted.Render("  Ctrl+R — случайный · пусто = системный"), innerW))
 	case sFormUA:
 		title = "User-Agent по умолчанию"
-		rows = append(rows, wrapField("User-Agent", m.settingsForm.value+bar, true, innerW)...)
+		rows = append(rows, wrapField("User-Agent", fieldValue(m.settingsForm.value, m.settingsForm.valuePasted)+bar, true, innerW)...)
 		rows = append(rows, clipLine(styleMuted.Render("  пусто = Fluffify/1.0.0"), innerW))
 	case sFormAuth:
 		title = "Авторизация SOCKS / HTTP"
@@ -558,63 +561,14 @@ func shortPingURL(raw string) string {
 	}
 }
 
-func isSystemdAutostartEnabled() bool {
-	err := exec.Command("systemctl", "--user", "is-enabled", "--quiet", "xray-tui.service").Run()
-	return err == nil
-}
-
-func setSystemdAutostart(enable bool) error {
-	if _, err := exec.LookPath("systemctl"); err != nil {
-		return fmt.Errorf("systemctl не найден")
+func daemonStartHint() string {
+	if runtime.GOOS == "windows" {
+		return osutil.SelfName() + " restart-admin — демон с правами админа (нужно для TUN)"
 	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	if autostart.Enabled() {
+		return "systemctl --user start xray-tui"
 	}
-	unitDir := filepath.Join(home, ".config", "systemd", "user")
-	unitPath := filepath.Join(unitDir, "xray-tui.service")
-
-	if enable {
-		if _, err := os.Stat(unitPath); os.IsNotExist(err) {
-			exe, err := os.Executable()
-			if err != nil {
-				return err
-			}
-			if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-				exe = resolved
-			}
-			if err := os.MkdirAll(unitDir, 0o755); err != nil {
-				return err
-			}
-			unit := fmt.Sprintf(`[Unit]
-Description=Xray TUI Background Daemon
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=%s daemon
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-`, exe)
-			if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
-				return err
-			}
-		}
-		_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-		if out, err := exec.Command("systemctl", "--user", "enable", "xray-tui.service").CombinedOutput(); err != nil {
-			return fmt.Errorf("%s", strings.TrimSpace(string(out)))
-		}
-		return nil
-	}
-
-	if out, err := exec.Command("systemctl", "--user", "disable", "xray-tui.service").CombinedOutput(); err != nil {
-		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
-	}
-	return nil
+	return "xray-tui daemon"
 }
 
 // wrapField переносит длинный текст на несколько строк внутри формы, чтобы всё было видно.

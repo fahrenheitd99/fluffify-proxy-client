@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -28,7 +27,7 @@ func NewClient(socketPath string) *Client {
 
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "unix", socketPath)
+			return Dial(ctx, socketPath)
 		},
 	}
 
@@ -65,6 +64,11 @@ func (c *Client) Stop() (*StatusResponse, error) {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// Quit просит демон завершиться целиком (нужно для перезапуска с правами админа).
+func (c *Client) Quit() error {
+	return c.doJSON(http.MethodPost, "/quit", nil, nil)
 }
 
 func (c *Client) Logs() ([]string, error) {
@@ -136,7 +140,7 @@ func (c *Client) doJSON(method, path string, body io.Reader, out any) error {
 }
 
 func wrapConnErr(err error) error {
-	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
+	if IsDaemonDown(err) {
 		return errors.New("демон не запущен (выполни в отдельном окне: xray-tui daemon)")
 	}
 	return err

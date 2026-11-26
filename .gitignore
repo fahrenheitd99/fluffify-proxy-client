@@ -1,16 +1,30 @@
+# собранные бинарники
 /xray-tui
-fluffify
+/fluffify
 *.exe
 
 pkg/
 src/
 *.pkg.tar.zst
 *.tar.gz
+packaging/windows/*.zip
+packaging/windows/*.dll
+packaging/windows/*.dat
+packaging/windows/LICENSE-*
+packaging/windows/README-Xray.md
+packaging/windows/Xray-version.txt
 
 *.log
 
+# системный мусор
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
 # отладочные материалы и локальные артефакты
 .qwen/
+.fordebug/
 packaging/fluffify-git/
 package.json
 package-lock.json

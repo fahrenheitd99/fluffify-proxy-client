@@ -1,12 +1,10 @@
 package ping
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -15,40 +13,6 @@ import (
 )
 
 var icmpTimeRe = regexp.MustCompile(`time[=<]\s*([0-9]+(?:\.[0-9]+)?)\s*ms`)
-
-// PhysicalIface находит активный физический интерфейс в /proc/net/route, исключая TUN и lo.
-func PhysicalIface(exclude string) string {
-	f, err := os.Open("/proc/net/route")
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	var fallback string
-	sc := bufio.NewScanner(f)
-	first := true
-	for sc.Scan() {
-		if first {
-			first = false
-			continue
-		}
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 3 {
-			continue
-		}
-		iface, dest, gw := fields[0], fields[1], fields[2]
-		if iface == "lo" || (exclude != "" && iface == exclude) {
-			continue
-		}
-		if dest == "00000000" {
-			return iface
-		}
-		if fallback == "" && gw != "00000000" {
-			fallback = iface
-		}
-	}
-	return fallback
-}
 
 func resolveHostIP(ctx context.Context, host string) (string, error) {
 	host = strings.TrimSpace(host)
@@ -84,13 +48,7 @@ func MeasureICMP(ctx context.Context, host string, bypassIface string) (time.Dur
 		pCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		defer cancel()
 
-		args := []string{"-n", "-c", "1", "-W", "2"}
-		if iface != "" {
-			args = append(args, "-I", iface)
-		}
-		args = append(args, ip)
-
-		out, err := exec.CommandContext(pCtx, "ping", args...).CombinedOutput()
+		out, err := exec.CommandContext(pCtx, "ping", icmpArgs(ip, iface)...).CombinedOutput()
 		if m := icmpTimeRe.FindSubmatch(out); len(m) == 2 {
 			if ms, parseErr := strconv.ParseFloat(string(m[1]), 64); parseErr == nil {
 				return time.Duration(ms * float64(time.Millisecond)), nil
