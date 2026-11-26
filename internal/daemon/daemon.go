@@ -326,7 +326,9 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 	// Старт синхронный: вернувшаяся ошибка уже описывает проблему ядра.
 	if err := d.engine.Start(cfg, req.AssetDir); err != nil {
 		errMsg := err.Error()
-		if mode == "tun" {
+		// Подсказка про права только при реальном их отсутствии, иначе
+		// любая ошибка ядра в TUN-режиме выглядела бы как «нет прав».
+		if mode == "tun" && !hasTunPermission() {
 			errMsg += " — " + tunHint()
 		}
 		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: errMsg})
@@ -348,10 +350,8 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleStop(w http.ResponseWriter, _ *http.Request) {
-	if err := d.engine.Stop(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
-		return
-	}
+	// Ошибки закрытия отдельных фич не мешают остановке ядра и уходят в лог.
+	_ = d.engine.Stop()
 	writeJSON(w, http.StatusOK, d.statusSnapshot())
 }
 

@@ -37,6 +37,7 @@ type Options struct {
 type Engine struct {
 	mu       sync.Mutex
 	instance *xcore.Instance
+	onLog    func(string)
 }
 
 // New создаёт движок; ядро стартует только по вызову Start.
@@ -46,7 +47,14 @@ func New(opts Options) *Engine {
 	if opts.OnLog != nil {
 		sink.set(opts.OnLog)
 	}
-	return &Engine{}
+	return &Engine{onLog: opts.OnLog}
+}
+
+// warn пишет сообщение в приёмник логов, если он подключён.
+func (e *Engine) warn(line string) {
+	if e.onLog != nil {
+		e.onLog(line)
+	}
 }
 
 // Start поднимает Xray из JSON-конфига в этом процессе. Если ядро уже
@@ -68,9 +76,12 @@ func (e *Engine) Start(configJSON []byte, assetDir string) error {
 
 	// Снимаем работающий инстанс до создания нового: сокеты и TUN-адаптер
 	// должны освободиться, иначе займём те же порты дважды.
-	if err := e.Stop(); err != nil {
-		return err
-	}
+	//
+	// Важно: Xray возвращает ошибку Close, если хотя бы одна фича не
+	// закрылась. Прерывать из-за этого запуск нового инстанса нельзя —
+	// именно поэтому повторное включение TUN раньше падало. Ядро при этом
+	// остановлено, предупреждение уходит в лог.
+	_ = e.Stop()
 
 	cfg, err := serial.LoadJSONConfig(bytes.NewReader(configJSON))
 	if err != nil {
@@ -92,7 +103,9 @@ func (e *Engine) Start(configJSON []byte, assetDir string) error {
 	return nil
 }
 
-// Stop закрывает инстанс Xray, освобождая порты и TUN-адаптер.
+// Stop закрывает инстанс Xray, освобождая порты и TUN-адаптер. Ядро
+// останавливается всегда; ошибки закрытия отдельных фич не прерывают
+// остановку и уходят в лог — следующий Start должен работать.
 func (e *Engine) Stop() error {
 	e.mu.Lock()
 	instance := e.instance
@@ -102,7 +115,10 @@ func (e *Engine) Stop() error {
 	if instance == nil {
 		return nil
 	}
-	return instance.Close()
+	if err := instance.Close(); err != nil {
+		e.warn("предыдущее ядро остановлено с предупреждением: " + err.Error())
+	}
+	return nil
 }
 
 // Running сообщает, поднято ли ядро.
