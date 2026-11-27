@@ -49,6 +49,9 @@ func EnsureRunning() {
 func Run(socketPath string) {
 	osutil.HideConsole()
 
+	// Тёмное/системное меню — до создания пунктов (Windows; на Linux no-op).
+	applyMenuTheme()
+
 	unlock, ok := osutil.TryLock(trayLockName)
 	if !ok {
 		return
@@ -111,6 +114,10 @@ func serverTitle(p config.Profile) string {
 }
 
 func onReady(socketPath string) {
+	// Повторно применяем тёмную тему меню: окно systray уже создано,
+	// пункты меню — ещё нет (Windows; на Linux no-op).
+	applyMenuTheme()
+
 	client := ipc.NewClient(socketPath)
 
 	accentPath := trayAccentPath()
