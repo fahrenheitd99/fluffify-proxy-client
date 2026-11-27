@@ -1513,48 +1513,10 @@ func (m model) renderHeader(w int) string {
 		botRow1 = clipLine(line2, nameMaxW)
 		botRow2 = clipLine(line3, nameMaxW)
 	} else {
-		var dlStr, ulStr string
-		if state == "on" && !waving {
-			dlStr = styleGreen.Render("↓") + " " + formatSpeed(m.netSpeed.rxRate)
-			ulStr = styleAccent.Render("↑") + " " + formatSpeed(m.netSpeed.txRate)
-		} else {
-			dlStr = styleMuted.Render("↓ 0 B/s")
-			ulStr = styleMuted.Render("↑ 0 B/s")
-		}
-
-		speedW := maxInt(termWidth(dlStr), termWidth(ulStr))
-		dlPadded := dlStr + strings.Repeat(" ", speedW-termWidth(dlStr))
-		ulPadded := ulStr + strings.Repeat(" ", speedW-termWidth(ulStr))
-
-		speedX := (innerW - speedW) / 2
-		maxSpeedX := innerW - statusButtonW - speedW - 2
-		if maxSpeedX < 1 {
-			maxSpeedX = 1
-		}
-		if speedX > maxSpeedX {
-			speedX = maxSpeedX
-		}
-
-		needDebugW := maxInt(termWidth(line2), termWidth(line3))
-		if needDebugW+2 > speedX && speedX < maxSpeedX {
-			speedX = needDebugW + 2
-			if speedX > maxSpeedX {
-				speedX = maxSpeedX
-			}
-		}
-
-		maxDebugW := speedX - 2
-		if maxDebugW < 1 {
-			maxDebugW = maxInt(1, speedX-1)
-		}
-		l2 := clipLine(line2, maxDebugW)
-		l3 := clipLine(line3, maxDebugW)
-
-		pad2 := maxInt(1, speedX-termWidth(l2))
-		pad3 := maxInt(1, speedX-termWidth(l3))
-
-		botRow1 = l2 + strings.Repeat(" ", pad2) + dlPadded
-		botRow2 = l3 + strings.Repeat(" ", pad3) + ulPadded
+		// Скорость подключения (↓/↑ B/s) из шапки убрана — слева только
+		// статусные строки, справа иконка подключения.
+		botRow1 = clipLine(line2, nameMaxW)
+		botRow2 = clipLine(line3, nameMaxW)
 	}
 
 	leftCols := make([]string, 0, len(nameLines)+2)
