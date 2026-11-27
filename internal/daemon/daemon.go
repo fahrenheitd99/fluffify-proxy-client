@@ -557,11 +557,13 @@ func (d *Daemon) handleDevStatus(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()
 	snap := ipc.DevStatusResponse{
 		Running:   d.runner.IsRunning(),
-		StartedAt: d.startedAt.Format(time.RFC3339),
-		UptimeSec: int64(time.Since(d.startedAt).Seconds()),
 		Profile:   d.activeProfile,
 		Mode:      d.mode,
 		DevLog:    d.devLog,
+	}
+	if !d.startedAt.IsZero() {
+		snap.StartedAt = d.startedAt.Format(time.RFC3339)
+		snap.UptimeSec = int64(time.Since(d.startedAt).Seconds())
 	}
 	d.mu.Unlock()
 	if snap.Running {

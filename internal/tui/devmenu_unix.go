@@ -117,7 +117,7 @@ func tunReadinessReport() string {
 	check(ruleOK, "polkit-правило resolve1 установлено", "демон будет запрашивать пароль при смене DNS")
 
 	ipFwd := readOneLine("/proc/sys/net/ipv4/ip_forward")
-	check(ipFwd == "1", "IP forwarding включён", "Xray включит его сам при старте TUN")
+	check(ipFwd == "1", "IP forwarding включён", "выключен — Xray включит его сам при старте TUN, это не ошибка")
 
 	b.WriteString("\nПодсказка: без системного пакета включите автозапуск из настроек —\nон сам поставит юнит и права (если запускать от админа).\n")
 	return b.String()
