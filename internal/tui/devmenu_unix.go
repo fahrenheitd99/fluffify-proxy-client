@@ -13,6 +13,41 @@ import (
 	"xray-tui/internal/osutil"
 )
 
+// devMenuLogItems — два первых пункта dev-меню (журналы). Только Unix:
+// на Windows журнал ядра/приложения можно смотреть средствами системы,
+// а PS-окна с tail решили не показывать.
+func devMenuLogItems() []string {
+	return []string{"Логи ядра (info) — вкл/выкл", "Логи приложения"}
+}
+
+// devMenuLogValues — значения для log-пунктов.
+func devMenuLogValues(devLog string) []string {
+	return []string{devLog, "открыть →"}
+}
+
+// devMenuOffset — размер log-блока перед базовыми пунктами.
+func devMenuOffset() int { return len(devMenuLogItems()) }
+
+// devMenuExtraTail — хвостовые пункты (Linux-only): TUN и journalctl.
+func devMenuExtraTail() []string {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	return []string{"Готовность к TUN", "Журнал демона (journalctl)"}
+}
+
+// devMenuExtraTailValues — значения хвостовых пунктов.
+func (m model) devMenuExtraTailValues() []string {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	tunReady := "?"
+	if m.tunReadyKnown {
+		tunReady = onOffLabel(m.tunReady)
+	}
+	return []string{tunReady, "открыть →"}
+}
+
 // openDaemonJournal открывает журнал демона: системный юнит из пакета
 // или пользовательский fallback.
 func openDaemonJournal() {

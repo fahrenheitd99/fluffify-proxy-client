@@ -23,25 +23,24 @@ import (
 // (аналог routing-экранов). Все действия открывают внешние терминалы
 // и просмотрщики; в сам TUI ничего не пишется — вкладка «Логи» удалена.
 
+// devMenuTitles — пункты dev-меню. Логи (ядро/приложение) — только на
+// Unix (на Windows журнал читается средствами самой системы), «Готовность
+// к TUN» и journalctl — тоже Linux-only.
 func devMenuTitles() []string {
-	items := []string{
-		"Логи ядра (info) — вкл/выкл",
-		"Логи приложения",
+	items := append([]string{}, devMenuLogItems()...)
+	items = append(items,
 		"Дамп конфига ядра",
 		"Проверить туннель",
 		"Статус ядра",
 		"Рестарт ядра",
 		"Диагностика",
-	}
-	if runtime.GOOS == "linux" {
-		items = append(items,
-			"Готовность к TUN",
-			"Журнал демона (journalctl)",
-		)
-	}
-	return items
+	)
+	return append(items, devMenuExtraTail()...)
 }
 
+// devMenuOffset — сколько пунктов стоит перед базовым блоком (логи).
+// Базовые действия (дамп/туннель/статус/рестарт/диагностика) сдвинуты
+// на эту величину; на Windows логов нет и offset = 0.
 func (m model) devMenuValues() []string {
 	running, devLog := "—", "—"
 	if st := m.devStatus; st != nil {
@@ -52,15 +51,9 @@ func (m model) devMenuValues() []string {
 		}
 		devLog = onOffLabel(st.DevLog)
 	}
-	vals := []string{devLog, "открыть →", "открыть →", "запустить →", running, "перезапустить", "собрать →"}
-	if runtime.GOOS == "linux" {
-		tunReady := "?"
-		if m.tunReadyKnown {
-			tunReady = onOffLabel(m.tunReady)
-		}
-		vals = append(vals, tunReady, "открыть →")
-	}
-	return vals
+	vals := append([]string{}, devMenuLogValues(devLog)...)
+	vals = append(vals, "открыть →", "запустить →", running, "перезапустить", "собрать →")
+	return append(vals, m.devMenuExtraTailValues()...)
 }
 
 func (m model) handleDevKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -85,8 +78,8 @@ func (m model) handleDevKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) runDevAction(idx int) (tea.Model, tea.Cmd) {
-	switch idx {
-	case 0: // Логи ядра: toggle info + зеркало + tail
+	// Логи ядра/приложения — только на Unix (devMenuOffset() = 2 там, 0 на Windows).
+	if idx == devMenuOffset()-2 { // Логи ядра: toggle info + зеркало + tail
 		st := m.devStatus
 		if st == nil {
 			m.notice = "Статус ядра недоступен (демон не отвечает)"
@@ -119,42 +112,44 @@ func (m model) runDevAction(idx int) (tea.Model, tea.Cmd) {
 		m.notice = "Отладочные логи ядра: info, зеркало " + filepath.Join(applog.Dir(), "xray.log")
 		m.noticeErr = false
 		return m, devStatusCmd(m.client)
-
-	case 1: // Логи приложения
+	}
+	if idx == devMenuOffset()-1 { // Логи приложения
 		_ = devterm.Terminal(logTailCmd(applog.File(), 100), false)
 		return m, nil
+	}
 
-	case 2: // Дамп конфига
+	switch idx - devMenuOffset() {
+	case 0: // Дамп конфига
 		m.busy = true
 		return m, devConfigDumpCmd(m.client)
 
-	case 3: // Проверить туннель
+	case 1: // Проверить туннель
 		m.busy = true
 		m.notice = "Проверяю туннель (~10 сек)..."
 		m.noticeErr = false
 		return m, devTunnelCheckCmd(m.client)
 
-	case 4: // Статус ядра
+	case 2: // Статус ядра
 		return m, devStatusReportCmd(m.client)
 
-	case 5: // Рестарт ядра
+	case 3: // Рестарт ядра
 		return m.reconnectIfRunning("Ядро перезапускается")
 
-	case 6: // Диагностика
+	case 4: // Диагностика
 		m.busy = true
 		m.notice = "Собираю диагностику..."
 		m.noticeErr = false
 		return m, devDiagnosticsCmd(m.client)
+	}
 
-	default:
-		if runtime.GOOS != "linux" {
-			return m, nil
-		}
-		if idx == 7 { // Готовность к TUN
+	// Хвостовые пункты (Linux): «Готовность к TUN», «Журнал демона».
+	tail := len(devMenuExtraTail())
+	if tail > 0 {
+		switch idx - (len(devMenuTitles()) - tail) {
+		case 0: // Готовность к TUN
 			m.busy = true
 			return m, devTunReadinessCmd()
-		}
-		if idx == 8 { // Журнал демона
+		case 1: // Журнал демона
 			openDaemonJournal()
 			return m, nil
 		}
