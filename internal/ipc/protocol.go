@@ -36,6 +36,37 @@ type LogsResponse struct {
 	Lines []string `json:"lines"`
 }
 
+// DevLogRequest — включение/выключение режима отладочных логов ядра.
+type DevLogRequest struct {
+	On bool `json:"on"`
+}
+
+// DevStatusResponse — сведения о запущенном ядре для dev-меню.
+type DevStatusResponse struct {
+	Running   bool   `json:"running"`
+	PID       int    `json:"pid,omitempty"`
+	Version   string `json:"version,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	UptimeSec int64  `json:"uptime_sec"`
+	Profile   string `json:"profile,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	DevLog    bool   `json:"dev_log"`
+}
+
+// DevConfigResponse — дамп последнего конфига ядра (секреты маскируются).
+type DevConfigResponse struct {
+	Config string `json:"config"`
+}
+
+// DevCheckResponse — результат проверки туннеля (см. internal/netcheck).
+type DevCheckResponse struct {
+	TunnelIP    string   `json:"tunnel_ip"`
+	DirectIP    string   `json:"direct_ip"`
+	DirectIface string   `json:"direct_iface,omitempty"`
+	ResolverIP  string   `json:"resolver_ip"`
+	Notes       []string `json:"notes,omitempty"`
+}
+
 type ErrorResponse struct {
 	Error string `json:"error"`
 }

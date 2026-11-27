@@ -138,6 +138,16 @@ func (r *Runner) IsRunning() bool {
 	return r.running
 }
 
+// Pid возвращает PID запущенного ядра (для меню разработчика).
+func (r *Runner) Pid() (int, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.running && r.cmd != nil && r.cmd.Process != nil {
+		return r.cmd.Process.Pid, true
+	}
+	return 0, false
+}
+
 func (r *Runner) Logs() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

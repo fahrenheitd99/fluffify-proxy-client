@@ -9,15 +9,18 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"xray-tui/internal/applog"
 	"xray-tui/internal/config"
 	"xray-tui/internal/core"
 	"xray-tui/internal/generator"
 	"xray-tui/internal/ipc"
+	"xray-tui/internal/netcheck"
 	"xray-tui/internal/osutil"
 )
 
@@ -51,6 +54,7 @@ var tunRequiresAdmin = osutil.TunRequiresAdmin
 type Daemon struct {
 	socketPath string
 	runner     *core.Runner
+	xrayBin    string
 
 	mu            sync.Mutex
 	startedAt     time.Time
@@ -62,6 +66,14 @@ type Daemon struct {
 	mode          string
 	tunName       string
 	elevated      bool
+
+	// Dev-режим: логи ядра на info + зеркало в файл. lastConfig —
+	// последний конфиг, присланный клиентом (без dev-патча уровня).
+	devLog       bool
+	logMirror    *os.File
+	lastConfig   []byte
+	lastAssetDir string
+	version      string
 
 	subsMu sync.RWMutex
 	subs   map[chan string]struct{}
@@ -78,6 +90,7 @@ func New(socketPath, xrayBin string) *Daemon {
 
 	d := &Daemon{
 		socketPath: socketPath,
+		xrayBin:    xrayBin,
 		subs:       make(map[chan string]struct{}),
 		stopCh:     make(chan struct{}),
 		quitCh:     make(chan struct{}),
@@ -88,6 +101,7 @@ func New(socketPath, xrayBin string) *Daemon {
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	applog.Init("daemon")
 	if err := os.MkdirAll(filepath.Dir(d.socketPath), 0o700); err != nil {
 		return fmt.Errorf("не удалось создать директорию сокета: %w", err)
 	}
@@ -118,6 +132,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /quit", d.handleQuit)
 	mux.HandleFunc("GET /logs", d.handleLogs)
 	mux.HandleFunc("GET /logs/stream", d.handleLogsStream)
+	mux.HandleFunc("POST /devlog", d.handleDevLog)
+	mux.HandleFunc("GET /devstatus", d.handleDevStatus)
+	mux.HandleFunc("GET /devconfig", d.handleDevConfig)
+	mux.HandleFunc("POST /devcheck", d.handleDevCheck)
 
 	srv := &http.Server{
 		Handler:           mux,
@@ -133,6 +151,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}()
 
 	fmt.Printf("[daemon] слушает %s\n", d.socketPath)
+	applog.Event("daemon listening", "socket", d.socketPath, "elevated", d.elevated)
 	go d.tryAutoConnect()
 
 	select {
@@ -167,9 +186,17 @@ func (d *Daemon) tryAutoConnect() {
 		fmt.Fprintf(os.Stderr, "[daemon] автоподключение пропущено: %v\n", err)
 		return
 	}
+	if cfg := d.devPatchedConfig(res.Config); cfg != nil {
+		res.Config = cfg
+	}
+	d.mu.Lock()
+	d.lastConfig = append([]byte(nil), res.Config...)
+	d.lastAssetDir = res.AssetDir
+	d.mu.Unlock()
 
 	if err := d.runner.Start(res.Config, res.AssetDir); err != nil {
 		fmt.Fprintf(os.Stderr, "[daemon] ошибка автоподключения: %v\n", err)
+		applog.Fail("autoconnect failed", err, "profile", prof.Name)
 		return
 	}
 
@@ -185,9 +212,16 @@ func (d *Daemon) tryAutoConnect() {
 	d.mu.Unlock()
 
 	fmt.Printf("[daemon] автоподключение: %s (%s)\n", prof.Name, store.Settings.Mode)
+	applog.Event("autoconnect", "profile", prof.Name, "mode", store.Settings.Mode)
 }
 
 func (d *Daemon) broadcastLog(line string) {
+	d.mu.Lock()
+	if d.devLog && d.logMirror != nil {
+		fmt.Fprintln(d.logMirror, line)
+	}
+	d.mu.Unlock()
+
 	d.subsMu.RLock()
 	defer d.subsMu.RUnlock()
 
@@ -284,6 +318,20 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		socksAddr = "127.0.0.1:10808"
 	}
 
+	// Последний конфиг запоминаем в исходном виде: dev-патч уровня логов
+	// накладывается при каждом старте ядра, а дамп (/devconfig) показывает
+	// фактический (запатченный) вариант.
+	d.mu.Lock()
+	devLog := d.devLog
+	if len(bytes.TrimSpace(req.Config)) > 0 {
+		d.lastConfig = append([]byte(nil), cfg...)
+		d.lastAssetDir = req.AssetDir
+	}
+	d.mu.Unlock()
+	if devLog {
+		cfg = patchLogLevel(cfg, "info")
+	}
+
 	if d.runner.IsRunning() {
 		if err := d.runner.Stop(); err != nil {
 			writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
@@ -293,6 +341,7 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 
 	if err := d.runner.Start(cfg, req.AssetDir); err != nil {
 		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: err.Error()})
+		applog.Fail("core start failed", err, "profile", profile)
 		return
 	}
 
@@ -334,6 +383,7 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 	d.tunName = tunName
 	d.mu.Unlock()
 
+	applog.Event("core started", "profile", profile, "mode", mode)
 	writeJSON(w, http.StatusOK, d.statusSnapshot())
 }
 
@@ -342,6 +392,7 @@ func (d *Daemon) handleStop(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
 		return
 	}
+	applog.Event("core stopped")
 	writeJSON(w, http.StatusOK, d.statusSnapshot())
 }
 
@@ -403,4 +454,205 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// --- Меню разработчика ---
+
+// devPatchedConfig возвращает конфиг с loglevel=info, если включён
+// dev-режим логов; иначе nil.
+func (d *Daemon) devPatchedConfig(cfg []byte) []byte {
+	d.mu.Lock()
+	on := d.devLog
+	d.mu.Unlock()
+	if !on {
+		return nil
+	}
+	return patchLogLevel(cfg, "info")
+}
+
+// patchLogLevel перезаписывает log.loglevel в конфиге ядра. Xray не умеет
+// менять уровень на лету, поэтому dev-переключение включает рестарт ядра.
+func patchLogLevel(cfg []byte, level string) []byte {
+	var doc map[string]any
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		return cfg
+	}
+	logBlock, ok := doc["log"].(map[string]any)
+	if !ok {
+		logBlock = map[string]any{}
+		doc["log"] = logBlock
+	}
+	logBlock["loglevel"] = level
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return cfg
+	}
+	return out
+}
+
+// setDevLog включает/выключает зеркалирование логов ядра в файл и
+// перезапускает ядро, чтобы новый уровень логов вступил в силу.
+func (d *Daemon) setDevLog(on bool) error {
+	d.mu.Lock()
+	d.devLog = on
+	if on {
+		if err := os.MkdirAll(applog.Dir(), 0o700); err != nil {
+			d.devLog = false
+			d.mu.Unlock()
+			return fmt.Errorf("не удалось создать каталог журналов: %w", err)
+		}
+		f, err := os.OpenFile(filepath.Join(applog.Dir(), "xray.log"),
+			os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			d.devLog = false
+			d.mu.Unlock()
+			return fmt.Errorf("не удалось открыть зеркало логов: %w", err)
+		}
+		if d.logMirror != nil {
+			_ = d.logMirror.Close()
+		}
+		d.logMirror = f
+	} else if d.logMirror != nil {
+		f := d.logMirror
+		d.logMirror = nil
+		_ = f.Close()
+	}
+	restart := d.runner.IsRunning()
+	orig := append([]byte(nil), d.lastConfig...)
+	assetDir := d.lastAssetDir
+	d.mu.Unlock()
+
+	applog.Event("dev kernel log mode", "on", on)
+	if restart && len(orig) > 0 {
+		cfg := orig
+		if on {
+			cfg = patchLogLevel(orig, "info")
+		}
+		_ = d.runner.Stop()
+		if err := d.runner.Start(cfg, assetDir); err != nil {
+			applog.Fail("core restart for dev log failed", err)
+			return err
+		}
+		d.mu.Lock()
+		d.startedAt = time.Now()
+		d.mu.Unlock()
+	}
+	return nil
+}
+
+func (d *Daemon) handleDevLog(w http.ResponseWriter, r *http.Request) {
+	var req ipc.DevLogRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ipc.ErrorResponse{Error: "невалидный JSON запроса"})
+		return
+	}
+	if err := d.setDevLog(req.On); err != nil {
+		writeJSON(w, http.StatusInternalServerError, ipc.ErrorResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, d.statusSnapshot())
+}
+
+func (d *Daemon) handleDevStatus(w http.ResponseWriter, _ *http.Request) {
+	d.mu.Lock()
+	snap := ipc.DevStatusResponse{
+		Running:   d.runner.IsRunning(),
+		StartedAt: d.startedAt.Format(time.RFC3339),
+		UptimeSec: int64(time.Since(d.startedAt).Seconds()),
+		Profile:   d.activeProfile,
+		Mode:      d.mode,
+		DevLog:    d.devLog,
+	}
+	d.mu.Unlock()
+	if snap.Running {
+		snap.PID, _ = d.runner.Pid()
+		snap.Version = d.xrayVersion()
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// xrayVersion определяет и кэширует версию ядра (один запуск на процесс).
+func (d *Daemon) xrayVersion() string {
+	d.mu.Lock()
+	if d.version != "" {
+		v := d.version
+		d.mu.Unlock()
+		return v
+	}
+	d.mu.Unlock()
+
+	out, err := exec.Command(d.xrayBin, "version").CombinedOutput()
+	v := "unknown"
+	if err == nil {
+		if line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]; line != "" {
+			v = line
+		}
+	}
+	d.mu.Lock()
+	d.version = v
+	d.mu.Unlock()
+	return v
+}
+
+func (d *Daemon) handleDevConfig(w http.ResponseWriter, _ *http.Request) {
+	d.mu.Lock()
+	cfg := append([]byte(nil), d.lastConfig...)
+	d.mu.Unlock()
+
+	if len(cfg) == 0 {
+		writeJSON(w, http.StatusConflict, ipc.ErrorResponse{Error: "ядро ещё не запускалось — дамп нечего показать"})
+		return
+	}
+	writeJSON(w, http.StatusOK, ipc.DevConfigResponse{Config: string(maskConfigSecrets(cfg))})
+}
+
+// maskConfigSecrets маскирует чувствительные значения (UUID/пароли/ключи)
+// в дампе конфига: value[:4] + "…masked".
+func maskConfigSecrets(cfg []byte) []byte {
+	var doc any
+	if err := json.Unmarshal(cfg, &doc); err != nil {
+		return cfg
+	}
+	masked := maskNode(doc)
+	out, err := json.MarshalIndent(masked, "", "  ")
+	if err != nil {
+		return cfg
+	}
+	return out
+}
+
+func maskNode(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			switch k {
+			case "id", "password", "privateKey", "password1", "secret", "token":
+				if s, ok := val.(string); ok && len(s) > 4 {
+					t[k] = s[:4] + "…masked"
+					continue
+				}
+			}
+			t[k] = maskNode(val)
+		}
+		return t
+	case []any:
+		for i, val := range t {
+			t[i] = maskNode(val)
+		}
+		return t
+	default:
+		return v
+	}
+}
+
+func (d *Daemon) handleDevCheck(w http.ResponseWriter, _ *http.Request) {
+	res := netcheck.Check()
+	applog.Event("tunnel check", "tunnel_ip", res.TunnelIP, "direct_ip", res.DirectIP, "resolver", res.ResolverIP)
+	writeJSON(w, http.StatusOK, ipc.DevCheckResponse{
+		TunnelIP:    res.TunnelIP,
+		DirectIP:    res.DirectIP,
+		DirectIface: res.DirectIface,
+		ResolverIP:  res.ResolverIP,
+		Notes:       res.Notes,
+	})
 }

@@ -18,6 +18,7 @@ type Client struct {
 	socketPath   string
 	httpClient   *http.Client
 	streamClient *http.Client
+	slowClient   *http.Client // для медленных dev-команд (проверка туннеля)
 }
 
 func NewClient(socketPath string) *Client {
@@ -35,6 +36,7 @@ func NewClient(socketPath string) *Client {
 		socketPath:   socketPath,
 		httpClient:   &http.Client{Transport: transport, Timeout: 10 * time.Second},
 		streamClient: &http.Client{Transport: transport}, // без Timeout для SSE
+		slowClient:   &http.Client{Transport: transport, Timeout: 30 * time.Second},
 	}
 }
 
@@ -137,6 +139,75 @@ func (c *Client) doJSON(method, path string, body io.Reader, out any) error {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+// doJSONWithTimeout — то же, но с собственным таймаутом клиента (dev-команды,
+// которые могут выполняться несколько секунд).
+func (c *Client) doJSONWithTimeout(method, path string, body io.Reader, out any) error {
+	req, err := http.NewRequest(method, "http://unix"+path, body)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.slowClient.Do(req)
+	if err != nil {
+		return wrapConnErr(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var apiErr ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Error != "" {
+			return errors.New(apiErr.Error)
+		}
+		return fmt.Errorf("ошибка демона: %s", resp.Status)
+	}
+
+	if out != nil {
+		return json.NewDecoder(resp.Body).Decode(out)
+	}
+	return nil
+}
+
+// DevLog включает/выключает режим отладочных логов ядра (info + зеркало
+// в файл во внешнем каталоге журналов).
+func (c *Client) DevLog(on bool) error {
+	payload, err := json.Marshal(DevLogRequest{On: on})
+	if err != nil {
+		return err
+	}
+	return c.doJSON(http.MethodPost, "/devlog", bytes.NewReader(payload), nil)
+}
+
+// DevStatus — сведения о запущенном ядре.
+func (c *Client) DevStatus() (*DevStatusResponse, error) {
+	var resp DevStatusResponse
+	if err := c.doJSON(http.MethodGet, "/devstatus", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// DevConfig — дамп последнего конфига ядра (с секретами, замаскированными
+// на стороне демона).
+func (c *Client) DevConfig() (*DevConfigResponse, error) {
+	var resp DevConfigResponse
+	if err := c.doJSON(http.MethodGet, "/devconfig", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// DevCheck — проверка туннеля (внешний IP через туннель/мимо, DNS-резолвер).
+func (c *Client) DevCheck() (*DevCheckResponse, error) {
+	var resp DevCheckResponse
+	if err := c.doJSONWithTimeout(http.MethodPost, "/devcheck", nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 func wrapConnErr(err error) error {
