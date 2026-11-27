@@ -18,6 +18,7 @@ packaging/windows/*.zip
 *.swp
 
 # отладочные материалы и локальные артефакты
+AGENT_CONTEXT.md
 .qwen/
 .fordebug/
 reference-tun/
