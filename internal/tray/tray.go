@@ -19,6 +19,7 @@ import (
 	"fyne.io/systray"
 
 	"xray-tui/internal/autostart"
+	"xray-tui/internal/applog"
 	"xray-tui/internal/config"
 	"xray-tui/internal/daemon"
 	"xray-tui/internal/generator"
@@ -48,6 +49,8 @@ func EnsureRunning() {
 
 func Run(socketPath string) {
 	osutil.HideConsole()
+	applog.Init("tray")
+	applog.Event("tray started", "socket", socketPath)
 
 	// Тёмное/системное меню — до создания пунктов (Windows; на Linux no-op).
 	applyMenuTheme()
@@ -519,8 +522,10 @@ func onReady(socketPath string) {
 			store.Settings.ActiveProfileID = prof.ID
 			_ = store.Save()
 			actionErr = ""
+			applog.Event("connect via tray", "profile", prof.Name, "mode", store.Settings.Mode)
 		} else {
 			actionErr = err.Error()
+			applog.Fail("tray connect failed", err, "profile", prof.Name)
 		}
 	}
 
@@ -585,6 +590,7 @@ func onReady(socketPath string) {
 				st, err := client.Status()
 				if err == nil && st != nil && st.Running {
 					if _, stopErr := client.Stop(); stopErr == nil {
+						applog.Event("disconnect via tray")
 						actionErr = ""
 					} else {
 						actionErr = stopErr.Error()
@@ -831,6 +837,7 @@ const defaultSymbolicSVG = `<?xml version="1.0" encoding="UTF-8" standalone="no"
 </svg>`
 
 func shutdownAll(client *ipc.Client) {
+	applog.Event("tray shutdown")
 	if client != nil {
 		_, _ = client.Stop()
 	}
