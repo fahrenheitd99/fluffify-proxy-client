@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"xray-tui/internal/about"
+	"xray-tui/internal/applog"
 	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
 	"xray-tui/internal/osutil"
@@ -40,7 +41,7 @@ type settingsFormState struct {
 	pass        string
 }
 
-const totalSettingsItems = 21
+const totalSettingsItems = 22
 
 func (m model) inSettingsForm() bool {
 	return m.settingsForm.kind != sFormNone
@@ -49,6 +50,9 @@ func (m model) inSettingsForm() bool {
 func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.inSettingsForm() {
 		return m.handleSettingsFormKey(msg)
+	}
+	if m.devOpen {
+		return m.handleDevKey(msg)
 	}
 
 	key := msg.String()
@@ -232,6 +236,14 @@ func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.notice = "Лицензии сохранены в " + path + " и открыты"
 				m.noticeErr = false
 				return m, nil
+			}
+
+		case 21: // Меню разработчика
+			if isAction || key == "right" || key == "l" {
+				m.devOpen = true
+				m.devCursor = 0
+				applog.Event("dev menu opened")
+				return m, tea.Batch(devStatusCmd(m.client), tunProbeCmd())
 			}
 		}
 	}
@@ -420,6 +432,9 @@ func (m model) handleSettingsFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) renderSettings(w, h int) string {
+	if m.devOpen {
+		return m.renderDevMenu(w, h)
+	}
 	if m.inSettingsForm() {
 		return m.renderSettingsForm(w, h)
 	}
@@ -484,6 +499,7 @@ func (m model) renderSettings(w, h int) string {
 		renderSettingRow("User-Agent", uaVal, m.settingsCursor == 18, innerW),
 		renderSettingRow("Интерфейс", uiModeLabel(m.store.Settings.UIMode), m.settingsCursor == 19, innerW),
 		renderSettingRow("О приложении / лицензии", "открыть →", m.settingsCursor == 20, innerW),
+		renderSettingRow("Меню разработчика", "открыть →", m.settingsCursor == 21, innerW),
 	}
 
 	xrayLines := strings.Split(renderBox("Настройки Xray", xrayRows, w), "\n")

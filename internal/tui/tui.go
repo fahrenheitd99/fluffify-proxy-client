@@ -11,9 +11,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"xray-tui/internal/applog"
 	"xray-tui/internal/autostart"
 	"xray-tui/internal/config"
 	"xray-tui/internal/daemon"
+	"xray-tui/internal/devterm"
 	"xray-tui/internal/generator"
 	"xray-tui/internal/ipc"
 	"xray-tui/internal/osutil"
@@ -28,7 +30,6 @@ const (
 	tabServers tabID = iota
 	tabSubs
 	tabSettings
-	tabLogs
 )
 
 const localGroupID = "__local__"
@@ -100,10 +101,26 @@ type subSyncDoneMsg struct {
 	err    error
 }
 
-type logLineMsg string
-
-// elevateDoneMsg приходит после попытки перезапустить демон с правами админа.
 type elevateDoneMsg struct{ err error }
+
+type devStatusMsg struct {
+	st  *ipc.DevStatusResponse
+	err error
+}
+
+// devFileDoneMsg — результат команды, сохранившей файл отчёта; открывается
+// в системном просмотрщике.
+type devFileDoneMsg struct {
+	title string
+	path  string
+	err   error
+}
+
+// tunProbeMsg — результат проверки готовности к TUN для dev-меню.
+type tunProbeMsg struct {
+	known bool
+	ok    bool
+}
 
 type model struct {
 	client *ipc.Client
@@ -159,16 +176,18 @@ type model struct {
 	providerForm      providerFormState
 	jsonImportForm    jsonImportFormState
 
-	// Вкладка Логи
-	logs          []string
-	logOffset     int
-	logAutoScroll bool
-	logCh         chan string
-
 	// Мышь
 	lastClickAt time.Time
-	lastClickX  int
-	lastClickY  int
+
+	// Меню разработчика
+	devOpen   bool
+	devCursor int
+	devStatus *ipc.DevStatusResponse
+	// кэш готовности к TUN (Linux), обновляется при открытии dev-меню
+	tunReadyKnown bool
+	tunReady      bool
+	lastClickX    int
+	lastClickY    int
 }
 
 func Run(socketPath string) error {
@@ -179,26 +198,8 @@ func Run(socketPath string) error {
 	applyTheme(store.Settings.Theme, store.Settings.AccentColor)
 
 	client := ipc.NewClient(socketPath)
-	logCh := make(chan string, 256)
-
-	streamCtx, cancelStream := context.WithCancel(context.Background())
-	defer cancelStream()
-
-	go func() {
-		for {
-			_ = client.StreamLogs(streamCtx, func(line string) {
-				select {
-				case logCh <- line:
-				default:
-				}
-			})
-			select {
-			case <-streamCtx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
-		}
-	}()
+	applog.Init("tui")
+	applog.Event("tui started", "socket", socketPath)
 
 	m := model{
 		client:           client,
@@ -209,8 +210,6 @@ func Run(socketPath string) error {
 		collapsed:        make(map[string]bool),
 		pings:            make(map[string]pingState),
 		autostartEnabled: autostart.Enabled(),
-		logAutoScroll:    true,
-		logCh:            logCh,
 	}
 
 	rows := m.buildTreeRows()
@@ -231,7 +230,6 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		m.fetchStatusCmd(),
 		tickCmd(),
-		waitForLogCmd(m.logCh),
 	)
 }
 
@@ -351,7 +349,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case subSyncDoneMsg:
 		m.busy = false
-		m.appendLogs(msg.logs)
 		if msg.err != nil {
 			m.notice = msg.err.Error()
 			m.noticeErr = true
@@ -368,10 +365,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case logLineMsg:
-		m.appendLogs([]string{string(msg)})
-		return m, waitForLogCmd(m.logCh)
-
 	case geoDownloadDoneMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -386,6 +379,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.applyRoutingNowKeep()
 			}
 		}
+		return m, nil
+
+	case devStatusMsg:
+		if msg.err != nil {
+			m.notice = "Демон недоступен: " + msg.err.Error()
+			m.noticeErr = true
+			return m, nil
+		}
+		m.devStatus = msg.st
+		return m, nil
+
+	case tunProbeMsg:
+		m.tunReadyKnown, m.tunReady = msg.known, msg.ok
+		return m, nil
+
+	case devFileDoneMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.notice = msg.title + ": " + msg.err.Error()
+			m.noticeErr = true
+			return m, nil
+		}
+		if err := devterm.ViewFile(msg.path); err != nil {
+			m.notice = msg.title + ": не удалось открыть: " + err.Error()
+			m.noticeErr = true
+			return m, nil
+		}
+		applog.Event("report opened", "title", msg.title, "path", msg.path)
+		m.notice = msg.title + ": сохранено в " + msg.path
+		m.noticeErr = false
 		return m, nil
 
 	case elevateDoneMsg:
@@ -439,6 +462,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleRoutingKey(msg)
 	}
 
+	// Меню разработчика перехватывает все клавиши (как routing-экраны).
+	if m.tab == tabSettings && m.devOpen && !m.inSettingsForm() {
+		return m.handleDevKey(msg)
+	}
+
 	if m.searching {
 		switch key {
 		case "esc":
@@ -474,22 +502,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		m.tab = tabSettings
 		return m, nil
-	case "4":
-		m.tab = tabLogs
-		if m.logAutoScroll {
-			m.scrollLogsToBottom()
-		}
-		return m, nil
-	case "5":
+	case "4", "5":
 		return m, nil
 	case "tab":
-		m.tab = (m.tab + 1) % 4
-		if m.tab == tabLogs && m.logAutoScroll {
-			m.scrollLogsToBottom()
-		}
+		m.tab = (m.tab + 1) % 3
 		return m, nil
 	case "shift+tab":
-		m.tab = (m.tab + 3) % 4
+		m.tab = (m.tab + 2) % 3
 		return m, nil
 	}
 
@@ -504,8 +523,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleSubsKey(key)
 	case tabSettings:
 		return m.handleSettingsKey(msg)
-	case tabLogs:
-		return m.handleLogsKey(key)
 	}
 
 	return m, nil
@@ -890,31 +907,6 @@ func (m model) renderSubForm(w, h int) string {
 	return padLines(lines, h)
 }
 
-func (m model) handleLogsKey(key string) (tea.Model, tea.Cmd) {
-	switch key {
-	case "up", "k":
-		m.logAutoScroll = false
-		if m.logOffset > 0 {
-			m.logOffset--
-		}
-	case "down", "j":
-		maxOff := m.maxLogOffset()
-		if m.logOffset < maxOff {
-			m.logOffset++
-		}
-		if m.logOffset >= maxOff {
-			m.logAutoScroll = true
-		}
-	case "G", "end":
-		m.logAutoScroll = true
-		m.scrollLogsToBottom()
-	case "g", "home":
-		m.logAutoScroll = false
-		m.logOffset = 0
-	}
-	return m, nil
-}
-
 func (m model) toggleConnection() (tea.Model, tea.Cmd) {
 	if m.busy {
 		return m, nil
@@ -997,12 +989,6 @@ func (m model) beginDisconnect() (tea.Model, tea.Cmd) {
 	m.notice = ""
 	m.noticeErr = false
 	return m, tea.Batch(m.stopCmd(), animTickCmd(m.animGen))
-}
-
-func waitForLogCmd(ch <-chan string) tea.Cmd {
-	return func() tea.Msg {
-		return logLineMsg(<-ch)
-	}
 }
 
 func elevateDaemonCmd(sock string) tea.Cmd {
@@ -1150,6 +1136,7 @@ func (m model) syncSubsCmd(subIndex int) tea.Cmd {
 			if err := syncOneSub(store, sub); err != nil {
 				failed++
 				lastErr = err
+				applog.Fail("subscription sync failed", err, "subscription", subLabel(sub))
 				logs = append(logs, fmt.Sprintf("[подписка] %s: %v", subLabel(sub), err))
 				continue
 			}
@@ -1159,6 +1146,7 @@ func (m model) syncSubsCmd(subIndex int) tea.Cmd {
 					count++
 				}
 			}
+			applog.Event("subscription updated", "subscription", subLabel(sub), "nodes", count)
 			logs = append(logs, fmt.Sprintf("[подписка] %s обновлена: %d нод", subLabel(sub), count))
 		}
 		if err := store.Save(); err != nil {
@@ -1186,27 +1174,8 @@ func subLabel(sub *config.Subscription) string {
 	return sub.URL
 }
 
-// appendLogs добавляет строки в панель логи и не даёт ей расти бесконечно.
-func (m *model) appendLogs(lines []string) {
-	added := false
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		m.logs = append(m.logs, line)
-		added = true
-	}
-	if !added {
-		return
-	}
-	if len(m.logs) > 300 {
-		m.logs = m.logs[len(m.logs)-300:]
-	}
-	if m.logAutoScroll {
-		m.scrollLogsToBottom()
-	}
-}
-
+// syncOneSub синхронизирует одну подписку: скачивает список, парсит и
+// вливает профили в store.
 func syncOneSub(store *config.Store, sub *config.Subscription) error {
 	ua := sub.UserAgent
 	if ua == "" {
@@ -1399,8 +1368,6 @@ func (m model) View() string {
 			} else {
 				b.WriteString(m.renderSettings(w, bodyHeight))
 			}
-		case tabLogs:
-			b.WriteString(m.renderLogs(w, bodyHeight))
 		}
 	}
 
@@ -1636,24 +1603,22 @@ func splitTokenByWidth(s string, maxW int) []string {
 }
 
 func (m model) renderTabs(w int) string {
-	var labels [4]string
+	var labels [3]string
 	if w < 58 {
-		labels = [4]string{
+		labels = [3]string{
 			fmt.Sprintf("1:Серв(%d)", len(m.store.Profiles)),
 			fmt.Sprintf("2:Подп(%d)", len(m.store.Subscriptions)),
 			"3:Настр",
-			"4:Логи",
 		}
 	} else {
-		labels = [4]string{
+		labels = [3]string{
 			fmt.Sprintf("[1] Сервера (%d)", len(m.store.Profiles)),
 			fmt.Sprintf("[2] Подписки (%d)", len(m.store.Subscriptions)),
 			"[3] Настройки",
-			"[4] Логи",
 		}
 	}
 
-	parts := make([]string, 4)
+	parts := make([]string, 3)
 	for i, lbl := range labels {
 		if tabID(i) == m.tab {
 			parts[i] = renderTabActive(lbl)
@@ -1889,53 +1854,6 @@ func renderSettingRow(label, value string, selected bool, innerW int) string {
 	return row
 }
 
-func (m model) wrappedLogLines(w int) []string {
-	contentW := maxInt(10, w-2)
-	out := make([]string, 0, len(m.logs))
-	for _, raw := range m.logs {
-		style := styleMuted
-		switch {
-		case strings.Contains(raw, "[Error]") || strings.Contains(raw, "Failed to start") || strings.Contains(raw, "ошибк"):
-			style = styleRed
-		case strings.Contains(raw, "[Warning]"):
-			style = styleYellow
-		}
-		chunks := wrapTerm(uiutil.Display(raw), contentW)
-		if len(chunks) == 0 {
-			out = append(out, "")
-			continue
-		}
-		for _, ch := range chunks {
-			out = append(out, style.Render(" "+ch))
-		}
-	}
-	return out
-}
-
-func (m model) renderLogs(w, h int) string {
-	if len(m.logs) == 0 {
-		return padLines([]string{"", styleMuted.Render("  Логов пока нет.")}, h)
-	}
-
-	wrapped := m.wrappedLogLines(w)
-	start := m.logOffset
-	if start < 0 {
-		start = 0
-	}
-	maxOff := len(wrapped) - h
-	if maxOff < 0 {
-		maxOff = 0
-	}
-	if start > maxOff {
-		start = maxOff
-	}
-	end := start + h
-	if end > len(wrapped) {
-		end = len(wrapped)
-	}
-	return padLines(wrapped[start:end], h)
-}
-
 func (m model) renderFooter(w int) string {
 	sep := renderSeparator(w)
 
@@ -1955,6 +1873,10 @@ func (m model) renderFooter(w int) string {
 			help = "a добавить · enter/u обновить · U обновить все · space тоггл · q выход"
 		}
 	case tabSettings:
+		if m.devOpen {
+			help = "↑↓ выбор · ⏎ выполнить · esc назад · q"
+			break
+		}
 		switch m.routingView {
 		case routingProfiles:
 			help = "⏎ откр · spc выбр · a нов · i имп · e эксп · d уд · r"
@@ -1965,20 +1887,11 @@ func (m model) renderFooter(w int) string {
 		default:
 			help = "↑↓ выбор · ⏎/spc перекл · e свой ввод · q"
 		}
-	case tabLogs:
-		mode := "авто"
-		if !m.logAutoScroll {
-			mode = "пауза (G)"
-		}
-		if narrow {
-			help = fmt.Sprintf("↑↓ скролл · %s · spc · q выход", mode)
-		} else {
-			help = fmt.Sprintf("↑↓ скролл · %s · space тоггл · q выход", mode)
-		}
 	}
 
 	var bottomLine string
-	if m.store.Settings.UIMode == config.UIModeButtons {
+	// В меню разработчика кнопки скрыты — показываем подсказку.
+	if m.store.Settings.UIMode == config.UIModeButtons && !(m.tab == tabSettings && m.devOpen) {
 		bottomLine, _ = m.layoutFooterButtons(w)
 	} else {
 		bottomLine = clipLine(" "+styleMuted.Render(help), w)
@@ -2009,7 +1922,7 @@ func (m model) listHeight() int {
 	if m.tab == tabServers && (m.searching || m.filter != "") {
 		reserved++
 	}
-	if m.store.Settings.UIMode == config.UIModeButtons {
+	if m.store.Settings.UIMode == config.UIModeButtons && !(m.tab == tabSettings && m.devOpen) {
 		reserved += 2
 	}
 	h := m.height - reserved
@@ -2042,22 +1955,6 @@ func (m *model) clampTreeScroll() {
 	if m.offset < 0 {
 		m.offset = 0
 	}
-}
-
-func (m model) maxLogOffset() int {
-	w := m.width
-	if w < 38 {
-		w = 38
-	}
-	maxOff := len(m.wrappedLogLines(w)) - m.listHeight()
-	if maxOff < 0 {
-		return 0
-	}
-	return maxOff
-}
-
-func (m *model) scrollLogsToBottom() {
-	m.logOffset = m.maxLogOffset()
 }
 
 func modeLabel(mode string) string {

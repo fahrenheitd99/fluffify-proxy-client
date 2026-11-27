@@ -94,7 +94,7 @@ func emojiModel() model {
 		})
 	}
 	store.Settings.ActiveProfileID = store.Profiles[0].ID
-	return model{store: store, collapsed: map[string]bool{}, pings: map[string]pingState{}, logCh: make(chan string, 1)}
+	return model{store: store, collapsed: map[string]bool{}, pings: map[string]pingState{}}
 }
 
 // Каждая строка кадра должна занимать не больше клеток терминала, иначе
@@ -102,16 +102,10 @@ func emojiModel() model {
 func TestFrameFitsTerminalWidth(t *testing.T) {
 	applyTheme(config.ThemeDefaultDark, config.AccentCyan)
 	for _, ui := range []string{config.UIModeKeys, config.UIModeButtons} {
-		for _, tab := range []tabID{tabServers, tabSubs, tabLogs, tabSettings} {
+		for _, tab := range []tabID{tabServers, tabSubs, tabSettings} {
 			m := emojiModel()
 			m.store.Settings.UIMode = ui
 			m.tab = tab
-			if tab == tabLogs {
-				for i := 0; i < 300; i++ {
-					m.logs = append(m.logs, fmt.Sprintf("[Info] %d 🏴‍☠️ Сервер 🧦 ⚡ node ok", i))
-				}
-				m.scrollLogsToBottom()
-			}
 			for _, sz := range [][2]int{{40, 20}, {48, 22}, {60, 24}, {100, 30}, {38, 12}} {
 				m.width, m.height = sz[0], sz[1]
 				for c := 0; c < 44; c++ {
@@ -128,19 +122,6 @@ func TestFrameFitsTerminalWidth(t *testing.T) {
 						}
 					}
 				}
-			}
-		}
-	}
-}
-
-func TestWrappedLogLinesFitWidth(t *testing.T) {
-	for _, w := range []int{40, 60, 100} {
-		m := emojiModel()
-		m.tab = tabLogs
-		m.logs = []string{"🏴‍☠️ Сервер 🧦 ⚡ " + strings.Repeat("x", 120)}
-		for i, ln := range m.wrappedLogLines(w) {
-			if tw := terminalWidthRef(ln); tw > w-1 {
-				t.Errorf("w=%d строка логов %d: ширина %d > %d", w, i, tw, w-1)
 			}
 		}
 	}

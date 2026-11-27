@@ -26,6 +26,7 @@ func (m *model) closeAllForms() {
 	m.profileForm = profileFormState{}
 	m.providerForm = providerFormState{}
 	m.jsonImportForm = jsonImportFormState{}
+	m.devOpen = false
 }
 
 func (m model) breadcrumbs() []breadcrumb {
@@ -78,6 +79,16 @@ func (m model) breadcrumbs() []breadcrumb {
 		}
 		if m.inSettingsForm() {
 			items = append(items, breadcrumb{label: settingsFormTitle(m.settingsForm.kind)})
+			return items
+		}
+		if m.devOpen {
+			items = append(items, breadcrumb{
+				label: "Разработчик",
+				action: func(m *model) {
+					m.closeAllForms()
+					m.devOpen = true
+				},
+			})
 			return items
 		}
 
@@ -152,16 +163,6 @@ func (m model) breadcrumbs() []breadcrumb {
 			}
 		}
 		return items
-
-	case tabLogs:
-		return []breadcrumb{
-			{
-				label: "Логи",
-				action: func(m *model) {
-					m.closeAllForms()
-				},
-			},
-		}
 	}
 	return nil
 }

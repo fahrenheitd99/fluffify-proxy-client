@@ -146,6 +146,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if m.routingView != routingNone {
 			return m.handleMouseRouting(msg.X, relY, bodyH, msg.Button, isDouble)
 		}
+		if m.devOpen && !m.inSettingsForm() {
+			return m.handleMouseDev(relY, bodyH)
+		}
 		return m.handleMouseSettings(w, relY, bodyH, msg.Button, isDouble)
 	}
 
@@ -153,6 +156,12 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleMouseWheel(dir int) (tea.Model, tea.Cmd) {
+	// Меню разработчика: колесо листает список.
+	if m.tab == tabSettings && m.devOpen && !m.inSettingsForm() {
+		n := len(devMenuTitles())
+		m.devCursor = clampInt(m.devCursor+dir*3, 0, n-1)
+		return m, nil
+	}
 	switch m.tab {
 	case tabServers:
 		rows := m.buildTreeRows()
@@ -221,25 +230,6 @@ func (m model) handleMouseWheel(dir int) (tea.Model, tea.Cmd) {
 				if m.routingProvCursor >= n {
 					m.routingProvCursor = n - 1
 				}
-			}
-		}
-
-	case tabLogs:
-		maxOff := m.maxLogOffset()
-		if dir < 0 {
-			if m.logAutoScroll {
-				m.logOffset = maxOff
-				m.logAutoScroll = false
-			}
-			m.logOffset -= 3
-			if m.logOffset < 0 {
-				m.logOffset = 0
-			}
-		} else {
-			m.logOffset += 3
-			if m.logOffset >= maxOff {
-				m.logOffset = maxOff
-				m.logAutoScroll = true
 			}
 		}
 	}
@@ -455,20 +445,18 @@ func (m model) handleMouseRouting(x, relY, bodyH int, btn tea.MouseButton, isDou
 }
 
 func (m model) tabIndexAt(w, x int) int {
-	var labels [4]string
+	var labels [3]string
 	if w < 58 {
-		labels = [4]string{
+		labels = [3]string{
 			fmt.Sprintf("1:Серв(%d)", len(m.store.Profiles)),
 			fmt.Sprintf("2:Подп(%d)", len(m.store.Subscriptions)),
 			"3:Настр",
-			"4:Логи",
 		}
 	} else {
-		labels = [4]string{
+		labels = [3]string{
 			fmt.Sprintf("[1] Сервера (%d)", len(m.store.Profiles)),
 			fmt.Sprintf("[2] Подписки (%d)", len(m.store.Subscriptions)),
 			"[3] Настройки",
-			"[4] Логи",
 		}
 	}
 
