@@ -92,7 +92,7 @@ type Settings struct {
 	TUNInterface string `json:"tun_interface"`
 	TUNMTU       int    `json:"tun_mtu"`
 	TUNAutoDNS   bool   `json:"tun_auto_dns"`
-	TUNIPv6      bool   `json:"tun_ipv6"`
+	TUNIPv6      *bool  `json:"tun_ipv6"`
 	Theme        string `json:"theme"`
 	AccentColor  string `json:"accent_color"`
 	UIMode       string `json:"ui_mode,omitempty"`
@@ -104,6 +104,16 @@ func (s *Settings) SniffingEnabled() bool {
 
 func (s *Settings) SetSniffing(v bool) {
 	s.Sniffing = &v
+}
+
+// TUNIPv6Value — настройка «IPv6 в TUN»: по умолчанию включена, явное
+// значение из store.json приоритетнее.
+func (s *Settings) TUNIPv6Value() bool {
+	return s.TUNIPv6 == nil || *s.TUNIPv6
+}
+
+func (s *Settings) SetTUNIPv6(v bool) {
+	s.TUNIPv6 = &v
 }
 
 func (s *Settings) GetHTTPPort() int {
@@ -280,7 +290,7 @@ func (s *Store) applyDefaults() {
 		s.Settings.Sniffing = &t
 	}
 	if s.Settings.LogLevel == "" {
-		s.Settings.LogLevel = "warning"
+		s.Settings.LogLevel = "error"
 	}
 	if s.Settings.DefaultUA == "" {
 		s.Settings.DefaultUA = "Fluffify/1.0.0"
@@ -309,8 +319,14 @@ func (s *Store) applyDefaults() {
 	if s.Settings.TUNMTU == 0 {
 		s.Settings.TUNMTU = 1500
 	}
+	// IPv6 в TUN по умолчанию включён; явное «выкл» в старых конфигах
+	// (tun_ipv6: false) сохраняется.
+	if s.Settings.TUNIPv6 == nil {
+		t := true
+		s.Settings.TUNIPv6 = &t
+	}
 	if s.Settings.LogLevel == "" {
-		s.Settings.LogLevel = "warning"
+		s.Settings.LogLevel = "error"
 	}
 
 	if len(s.Routing.GeoProviders) == 0 {

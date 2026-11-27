@@ -117,9 +117,9 @@ func (m model) handleSettingsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.reconnectIfRunning("DNS в TUN: " + onOffLabel(m.store.Settings.TUNAutoDNS))
 
 		case 4: // IPv6 в TUN
-			m.store.Settings.TUNIPv6 = !m.store.Settings.TUNIPv6
+			m.store.Settings.SetTUNIPv6(!m.store.Settings.TUNIPv6Value())
 			_ = m.store.Save()
-			return m.reconnectIfRunning("IPv6 в TUN: " + onOffLabel(m.store.Settings.TUNIPv6))
+			return m.reconnectIfRunning("IPv6 в TUN: " + onOffLabel(m.store.Settings.TUNIPv6Value()))
 
 		case 5: // Sniffing
 			m.store.Settings.SetSniffing(!m.store.Settings.SniffingEnabled())
@@ -464,7 +464,7 @@ func (m model) renderSettings(w, h int) string {
 		renderSettingRow("Тип пинга", pingModeLabel(m.store.Settings.PingMode), m.settingsCursor == 1, innerW),
 		renderSettingRow("Правила роутинга", routingVal, m.settingsCursor == 2, innerW),
 		renderSettingRow("DNS в TUN", onOffLabel(m.store.Settings.TUNAutoDNS), m.settingsCursor == 3, innerW),
-		renderSettingRow("IPv6 в TUN (::/0)", onOffLabel(m.store.Settings.TUNIPv6), m.settingsCursor == 4, innerW),
+		renderSettingRow("IPv6 в TUN (::/0)", onOffLabel(m.store.Settings.TUNIPv6Value()), m.settingsCursor == 4, innerW),
 		renderSettingRow("Sniffing", onOffLabel(m.store.Settings.SniffingEnabled()), m.settingsCursor == 5, innerW),
 		renderSettingRow("Mixed (SOCKS+HTTP)", onOffLabel(m.store.Settings.MixedInbound), m.settingsCursor == 6, innerW),
 		renderSettingRow("Порт SOCKS5", strconv.Itoa(m.store.Settings.SocksPort), m.settingsCursor == 7, innerW),

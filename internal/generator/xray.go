@@ -68,7 +68,7 @@ func OptionsFromStore(store *config.Store) Options {
 		TUNName:        store.Settings.TUNInterface,
 		TUNMTU:         store.Settings.TUNMTU,
 		TUNAutoDNS:     store.Settings.TUNAutoDNS,
-		TUNIPv6:        store.Settings.TUNIPv6,
+		TUNIPv6:        store.Settings.TUNIPv6Value(),
 		RoutingEnabled: store.Routing.Enabled,
 		RoutingProfile: store.ActiveRoutingProfile(),
 	}
