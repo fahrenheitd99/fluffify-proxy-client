@@ -389,17 +389,23 @@ func (m model) renderDevMenu(w, h int) string {
 	rows = append(rows, clipLine(styleMuted.Render("  Управление логами и отладкой. Всё открывается во внешних окнах."), innerW))
 	rows = append(rows, "")
 	for i, title := range titles {
-		prefix, style := "  ", ""
+		prefix := "  "
+		ttl := uiutil.Display(title)
+		val := uiutil.Display(vals[i])
 		if m.devCursor == i {
-			prefix, style = "> ", "accent"
+			prefix = styleAccent.Render("▸ ")
+			ttl = styleCursorRow.Render(ttl)
+			val = styleAccent.Render(val)
 		}
-		line := fmt.Sprintf("%s%-34s %s", prefix, title, vals[i])
-		if style == "accent" {
-			line = styleAccent.Render(uiutil.Display(line))
-		} else {
-			line = uiutil.Display(line)
+		gap := innerW - termWidth(prefix) - termWidth(ttl) - termWidth(val)
+		if gap < 1 {
+			gap = 1
 		}
-		rows = append(rows, clipLine(line, innerW))
+		row := clipLine(prefix+ttl+strings.Repeat(" ", gap)+val, innerW)
+		if m.devCursor == i {
+			row = highlightRow(row, innerW)
+		}
+		rows = append(rows, row)
 	}
 	rows = append(rows, "")
 	rows = append(rows, clipLine(styleMuted.Render("  esc назад"), innerW))
