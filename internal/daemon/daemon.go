@@ -314,15 +314,7 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 			strings.Contains(strings.ToLower(reason), "not permitted") ||
 			strings.Contains(strings.ToLower(reason), "no such device") ||
 			strings.Contains(strings.ToLower(reason), "tun")) {
-			// Нода /dev/net/tun есть всегда, а вот модуль ядра tun часто не
-			// загружен — тогда никакие права не помогут, и подсказка про
-			// tun-setup вводила бы в заблуждение.
-			if !osutil.TUNDeviceReady() {
-				errMsg = "TUN не запустился — модуль ядра tun не загружен: выполни " +
-					"sudo modprobe tun (или " + osutil.SelfName() + " tun-setup)"
-			} else {
-				errMsg = "TUN не запустился — выполни: " + osutil.SelfName() + " tun-setup"
-			}
+			errMsg = "TUN не запустился — выполни: " + osutil.SelfName() + " tun-setup"
 		}
 		if reason != "" {
 			errMsg += ": " + reason
