@@ -39,9 +39,15 @@ func TestRuleFormReceivesKeys(t *testing.T) {
 		t.Fatalf("имя правила = %q, текст не дошёл до формы", m.ruleForm.name)
 	}
 
+	// Новое правило: шаг 1 — поле JSON, шаг 2 — выбор типа поля.
 	m = pressKey(m, tea.KeyDown)
 	if m.ruleForm.step != 1 {
-		t.Fatalf("step = %d, ждали 1 (выбор типа поля)", m.ruleForm.step)
+		t.Fatalf("step = %d, ждали 1 (поле JSON)", m.ruleForm.step)
+	}
+
+	m = pressKey(m, tea.KeyDown)
+	if m.ruleForm.step != 2 {
+		t.Fatalf("step = %d, ждали 2 (выбор типа поля)", m.ruleForm.step)
 	}
 
 	m = pressKey(m, tea.KeyRight)
@@ -96,5 +102,63 @@ func TestRuleFormCommitsRule(t *testing.T) {
 	}
 	if len(added.Domains) != 1 || added.Domains[0] != "ads.example.com" {
 		t.Fatalf("домены правила: %#v", added.Domains)
+	}
+}
+
+// Новое правило с заполненным полем JSON: правила импортируются пачкой,
+// ручные поля (тип/значения) при этом игнорируются.
+func TestRuleFormImportsJSON(t *testing.T) {
+	m := newRuleFormModel(t)
+	m.store.Routing.Profiles = append(m.store.Routing.Profiles, config.RoutingProfile{
+		ID:            config.NewID(),
+		Name:          "test",
+		GeoProviderID: config.DefaultGeoProviderID,
+	})
+	m.routingEditIdx = len(m.store.Routing.Profiles) - 1
+
+	m.ruleForm.jsonRules = `[{"outboundTag":"block","domain":["ads.example.com"]},{"outboundTag":"direct","ip":["10.0.0.0/8"],"remarks":"LAN"}]`
+
+	out, _ := m.handleRoutingKey(tea.KeyMsg{Type: tea.KeyCtrlS})
+	got := out.(model)
+	if got.ruleForm.active {
+		t.Fatal("после импорта форма должна закрыться")
+	}
+	rules := got.store.Routing.Profiles[m.routingEditIdx].Rules
+	if len(rules) != 2 {
+		t.Fatalf("импортировано %d правил, ждали 2", len(rules))
+	}
+	if rules[0].Outbound != "block" || len(rules[0].Domains) != 1 {
+		t.Fatalf("первое правило: %#v", rules[0])
+	}
+	if rules[1].Name != "LAN" || rules[1].Outbound != "direct" {
+		t.Fatalf("второе правило: %#v", rules[1])
+	}
+}
+
+// Новый профиль роутинга создаётся ПУСТЫМ: дефолтные правила — только
+// у встроенного «Основного».
+func TestNewRoutingProfileIsEmpty(t *testing.T) {
+	m := newRuleFormModel(t)
+	base := len(m.store.Routing.Profiles)
+
+	// Форма правила перекрывает форму профиля — закрываем её.
+	m.ruleForm = ruleFormState{}
+	m.profileForm = profileFormState{active: true, name: "Пустой"}
+	out, _ := m.handleRoutingKey(tea.KeyMsg{Type: tea.KeyEnter})
+	got := out.(model)
+
+	if len(got.store.Routing.Profiles) != base+1 {
+		t.Fatalf("профиль не создан (%d → %d)", base, len(got.store.Routing.Profiles))
+	}
+	created := got.store.Routing.Profiles[len(got.store.Routing.Profiles)-1]
+	if created.Name != "Пустой" {
+		t.Fatalf("создан %q, ждали «Пустой»", created.Name)
+	}
+	if len(created.Rules) != 0 {
+		t.Fatalf("новый профиль должен быть без правил, а там %d", len(created.Rules))
+	}
+	// Встроенный «Основной» остаётся с дефолтными правилами.
+	if len(got.store.Routing.Profiles[0].Rules) == 0 {
+		t.Fatal("у встроенного профиля правила не должны пропасть")
 	}
 }

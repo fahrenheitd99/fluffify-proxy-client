@@ -91,6 +91,11 @@ func (m *model) markFieldPasted() {
 		if m.jsonImportForm.step == 1 {
 			m.jsonImportForm.inputPasted = true
 		}
+	case m.ruleForm.active:
+		// Поле JSON есть только в форме нового правила (шаг 1).
+		if m.ruleForm.editIdx < 0 && m.ruleForm.step == 1 {
+			m.ruleForm.jsonPasted = true
+		}
 	case m.settingsForm.kind != sFormNone:
 		m.settingsForm.valuePasted = true
 	}
@@ -102,5 +107,6 @@ func (m *model) clearFieldPasted() {
 	m.subForm.jsonPasted = false
 	m.subForm.urlPasted = false
 	m.jsonImportForm.inputPasted = false
+	m.ruleForm.jsonPasted = false
 	m.settingsForm.valuePasted = false
 }

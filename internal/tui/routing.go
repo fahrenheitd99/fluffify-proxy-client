@@ -35,11 +35,15 @@ type geoDownloadDoneMsg struct {
 type ruleFormState struct {
 	active    bool
 	editIdx   int // -1 = новое правило, >= 0 = редактирование существующего
-	step      int // 0=название, 1=тип поля, 2=значения, 3=действие
+	step      int // см. steps(): 0=название, [JSON], тип, значения, действие
 	name      string
 	matchType int
 	value     string
 	outbound  int
+	// jsonRules — поле импорта в форме НОВОГО правила: вставленный JSON
+	// добавляет правила пачкой, вместо ручного заполнения одного.
+	jsonRules  string
+	jsonPasted bool
 }
 
 type profileFormState struct {
@@ -508,7 +512,9 @@ func (m model) handleProfileFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			DomainStrategy: "IPIfNonMatch",
 			RawJSONMode:    "prepend",
 			GeoProviderID:  defGeo,
-			Rules:          config.DefaultRoutingRules(),
+			// Новый профиль создаётся пустым: дефолтные правила — только у
+			// встроенного «Основного». Наполнить можно вручную, «i» или JSON.
+			Rules: []config.RoutingRule{},
 		}
 		m.store.Routing.Profiles = append(m.store.Routing.Profiles, prof)
 		_ = m.store.Save()
@@ -590,8 +596,20 @@ func (m model) handleProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// steps формы правила: в новом правиле между названием и типом есть поле
+// JSON (1), в редактировании его нет.
+func (f ruleFormState) steps() (typeStep, valueStep, outStep, maxStep int) {
+	if f.editIdx < 0 {
+		return 2, 3, 4, 4
+	}
+	return 1, 2, 3, 3
+}
+
 func (m model) handleRuleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	isNew := m.ruleForm.editIdx < 0
+	typeStep, valueStep, outStep, maxStep := m.ruleForm.steps()
+
 	switch key {
 	case "esc":
 		m.ruleForm = ruleFormState{}
@@ -600,14 +618,17 @@ func (m model) handleRuleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ruleForm.step--
 		}
 	case "down":
-		if m.ruleForm.step < 3 {
+		if m.ruleForm.step < maxStep {
 			m.ruleForm.step++
 		}
 	case "ctrl+s":
 		return m.commitRuleFormApplied()
 	case "enter":
-		if m.ruleForm.step < 3 {
-			if m.ruleForm.step == 2 && strings.TrimSpace(m.ruleForm.value) == "" {
+		if m.ruleForm.step < maxStep {
+			// Значения обязательны только при ручном вводе — с заполненным
+			// JSON поле значений можно пропустить целиком.
+			if m.ruleForm.step == valueStep && strings.TrimSpace(m.ruleForm.value) == "" &&
+				strings.TrimSpace(m.ruleForm.jsonRules) == "" {
 				m.notice = "Введи хотя бы одно значение"
 				m.noticeErr = true
 				return m, nil
@@ -617,31 +638,43 @@ func (m model) handleRuleFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.commitRuleFormApplied()
 	case "tab", "right":
-		if m.ruleForm.step == 1 {
+		if m.ruleForm.step == typeStep {
 			m.ruleForm.matchType = (m.ruleForm.matchType + 1) % len(ruleFieldTypes)
-		} else if m.ruleForm.step == 3 {
+		} else if m.ruleForm.step == outStep {
 			m.ruleForm.outbound = (m.ruleForm.outbound + 1) % 3
 		}
 	case "shift+tab", "left":
-		if m.ruleForm.step == 1 {
+		if m.ruleForm.step == typeStep {
 			m.ruleForm.matchType = (m.ruleForm.matchType + len(ruleFieldTypes) - 1) % len(ruleFieldTypes)
-		} else if m.ruleForm.step == 3 {
+		} else if m.ruleForm.step == outStep {
 			m.ruleForm.outbound = (m.ruleForm.outbound + 2) % 3
 		}
 	case "backspace":
-		if m.ruleForm.step == 0 {
+		switch m.ruleForm.step {
+		case 0:
 			m.ruleForm.name = trimLastRune(m.ruleForm.name)
-		} else if m.ruleForm.step == 2 {
+		case 1:
+			if isNew {
+				m.ruleForm.jsonRules = trimLastRune(m.ruleForm.jsonRules)
+			}
+		case valueStep:
 			m.ruleForm.value = trimLastRune(m.ruleForm.value)
 		}
 	default:
-		if m.ruleForm.step == 0 || m.ruleForm.step == 2 {
+		switch m.ruleForm.step {
+		case 0:
 			if add := extractInputText(msg); add != "" {
-				if m.ruleForm.step == 0 {
-					m.ruleForm.name += add
-				} else {
-					m.ruleForm.value += add
+				m.ruleForm.name += add
+			}
+		case 1:
+			if isNew {
+				if add := extractInputText(msg); add != "" {
+					m.ruleForm.jsonRules += add
 				}
+			}
+		case valueStep:
+			if add := extractInputText(msg); add != "" {
+				m.ruleForm.value += add
 			}
 		}
 	}
@@ -652,6 +685,12 @@ func (m model) commitRuleForm() model {
 	if m.routingEditIdx < 0 || m.routingEditIdx >= len(m.store.Routing.Profiles) {
 		m.ruleForm = ruleFormState{}
 		return m
+	}
+
+	// В новом правиле заполнено поле JSON: вместо одного ручного правила
+	// импортируем их пачкой (то же, что «i» в редакторе профиля).
+	if m.ruleForm.editIdx < 0 && strings.TrimSpace(m.ruleForm.jsonRules) != "" {
+		return m.commitRuleFormJSON()
 	}
 
 	rawVals := strings.Split(m.ruleForm.value, ",")
@@ -768,6 +807,24 @@ func (m model) applyRoutingNowKeep() (tea.Model, tea.Cmd) {
 
 // commitRuleFormApplied сохраняет правило и сразу применяет конфиг к работающему
 // прокси — ручное «r» для этого больше не нужно.
+// commitRuleFormJSON импортирует правила из поля JSON формы нового правила.
+func (m model) commitRuleFormJSON() model {
+	rp := &m.store.Routing.Profiles[m.routingEditIdx]
+	rules, err := parseExternalRulesJSON(m.ruleForm.jsonRules)
+	if err != nil {
+		// Форма остаётся открытой: можно поправить вставку и сохранить снова.
+		m.notice = err.Error()
+		m.noticeErr = true
+		return m
+	}
+	rp.Rules = append(rp.Rules, rules...)
+	_ = m.store.Save()
+	m.ruleForm = ruleFormState{}
+	m.routingRuleCursor = 5 + len(rp.Rules) - 1
+	m.setRoutingNotice(fmt.Sprintf("Импортировано %d правил", len(rules)))
+	return m
+}
+
 func (m model) commitRuleFormApplied() (tea.Model, tea.Cmd) {
 	m = m.commitRuleForm()
 	if m.noticeErr {
@@ -1029,26 +1086,41 @@ func (m model) renderProviderForm(w, h int) string {
 func (m model) renderRuleForm(w, h int) string {
 	innerW := maxInt(20, w-4)
 	bar := styleAccent.Render("█")
+	isNew := m.ruleForm.editIdx < 0
+	typeStep, valueStep, _, _ := m.ruleForm.steps()
 
 	nameVal := m.ruleForm.name
 	if m.ruleForm.step == 0 {
 		nameVal += bar
 	}
 	valText := m.ruleForm.value
-	if m.ruleForm.step == 2 {
+	if m.ruleForm.step == valueStep {
 		valText += bar
 	}
 
+	typeNum, valNum, outNum := 2, 3, 4
 	ft := ruleFieldTypes[m.ruleForm.matchType]
 	var rows []string
 	rows = append(rows, wrapField("1. Название", nameVal, m.ruleForm.step == 0, innerW)...)
-	rows = append(rows, renderFormField("2. Тип (←/→)", "["+ft.label+"]", m.ruleForm.step == 1, innerW))
-	rows = append(rows, wrapField("3. Значения", valText, m.ruleForm.step == 2, innerW)...)
+	if isNew {
+		typeNum, valNum, outNum = 3, 4, 5
+		jVal := fieldValue(m.ruleForm.jsonRules, m.ruleForm.jsonPasted)
+		if r := []rune(jVal); len(r) > 120 {
+			jVal = fmt.Sprintf("[%d симв.] %s ... %s", len(r), string(r[:45]), string(r[len(r)-45:]))
+		}
+		if m.ruleForm.step == 1 {
+			jVal += bar
+		}
+		rows = append(rows, wrapField("2. JSON правил (опц.)", jVal, m.ruleForm.step == 1, innerW)...)
+		rows = append(rows, clipLine(styleMuted.Render("   Вставь [{...}] или путь к .json — добавятся все правила пачкой"), innerW))
+	}
+	rows = append(rows, renderFormField(fmt.Sprintf("%d. Тип (←/→)", typeNum), "["+ft.label+"]", m.ruleForm.step == typeStep, innerW))
+	rows = append(rows, wrapField(fmt.Sprintf("%d. Значения", valNum), valText, m.ruleForm.step == valueStep, innerW)...)
 	rows = append(rows, clipLine(styleMuted.Render("   пр.: "+ft.hint), innerW))
-	rows = append(rows, renderFormField("4. Действие (←/→)", "["+strings.ToUpper(outboundNames[m.ruleForm.outbound])+"]", m.ruleForm.step == 3, innerW))
+	rows = append(rows, renderFormField(fmt.Sprintf("%d. Действие (←/→)", outNum), "["+strings.ToUpper(outboundNames[m.ruleForm.outbound])+"]", m.ruleForm.step == typeStep+2, innerW))
 
 	title := "Новое правило роутинга"
-	if m.ruleForm.editIdx >= 0 {
+	if !isNew {
 		title = "Редактирование правила"
 	}
 
