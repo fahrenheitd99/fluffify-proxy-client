@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,13 +15,19 @@ import (
 
 const tunCaps = "cap_net_admin,cap_net_raw+ep"
 
-// runTUNSetup выдаёт права на TUN бинарнику ядра xray: systemd-юнит пользователя
-// не может дать права демону (user-менеджер не владеет CAP_NET_ADMIN), поэтому
-// права должны лежать на самом xray — setcap через pkexec (в GUI) или sudo.
+// runTUNSetup готовит систему к TUN-режиму одной привилегированной командой:
+//
+//  1. модуль ядра tun (без него open("/dev/net/tun") даёт «no such device»:
+//     ноду systemd создаёт статически, а драйвер не зарегистрирован) +
+//     автозагрузка модуля при старте системы (/etc/modules-load.d/tun.conf);
+//  2. файловые права ядру xray: systemd user-юнит не может выдать
+//     CAP_NET_ADMIN демону, поэтому caps должны лежать на самом бинарнике.
+//
+// Права применяются через pkexec (в GUI) или sudo (в терминале).
 func runTUNSetup() error {
 	xrayPath := osutil.ResolveBinary("xray")
 	if !filepath.IsAbs(xrayPath) {
-		return errors.New("ядро xray не найдено ни рядом с приложением, ни в PATH")
+		return fmt.Errorf("ядро xray не найдено ни в PATH, ни рядом с приложением")
 	}
 	if resolved, err := filepath.EvalSymlinks(xrayPath); err == nil {
 		if _, err := os.Stat(resolved); err == nil {
@@ -30,30 +35,51 @@ func runTUNSetup() error {
 		}
 	}
 
-	if xrayHasFileCaps(xrayPath) {
-		fmt.Printf("Права на TUN уже есть: %s\n", xrayPath)
+	moduleMissing := !osutil.TUNDeviceReady()
+	capsMissing := !xrayHasFileCaps(xrayPath)
+
+	if !moduleMissing && !capsMissing {
+		fmt.Printf("TUN готов: модуль ядра tun загружен, права на %s есть.\n", xrayPath)
 		return nil
 	}
 
-	fmt.Printf("Выдаю права на TUN (%s) для %s...\n", tunCaps, xrayPath)
+	var parts []string
+	if moduleMissing {
+		parts = append(parts,
+			"modprobe tun",
+			"mkdir -p /etc/modules-load.d",
+			"echo tun > /etc/modules-load.d/tun.conf",
+		)
+	}
+	if capsMissing {
+		parts = append(parts, "setcap "+tunCaps+" "+shQuote(xrayPath))
+	}
+	script := strings.Join(parts, " && ")
+
+	fmt.Println("Нужны права администратора — подтверди запрос:")
 	var cmd *exec.Cmd
 	if _, err := exec.LookPath("pkexec"); err == nil && tui.HasGUI() {
-		cmd = exec.Command("pkexec", "setcap", tunCaps, xrayPath)
+		cmd = exec.Command("pkexec", "sh", "-c", script)
 	} else {
 		fmt.Println("pkexec недоступен — запускаю sudo (введи пароль в терминале):")
-		cmd = exec.Command("sudo", "setcap", tunCaps, xrayPath)
+		cmd = exec.Command("sudo", "sh", "-c", script)
 	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("не удалось выдать права (setcap %s): %w", xrayPath, err)
+		return fmt.Errorf("не удалось применить настройки TUN: %w", err)
 	}
 
-	if !xrayHasFileCaps(xrayPath) {
+	if moduleMissing && !osutil.TUNDeviceReady() {
+		return fmt.Errorf("модуль ядра tun не загрузился — проверь, что в ядре есть поддержка TUN (CONFIG_TUN=m)")
+	}
+	if capsMissing && !xrayHasFileCaps(xrayPath) {
 		return fmt.Errorf("setcap отработал, но права не видны на %s — перезапусти демон и повтори", xrayPath)
 	}
-	fmt.Println("Готово. Перезапусти демон (выйди из приложения и запусти заново) — TUN заработает.")
+
+	fmt.Println("Готово: модуль tun загружен (и будет загружаться при старте системы), права на ядро выданы.")
+	fmt.Println("Перезапусти демон (выйди из приложения и запусти заново) и включи TUN.")
 	return nil
 }
 
@@ -67,4 +93,9 @@ func xrayHasFileCaps(path string) bool {
 		return false
 	}
 	return strings.Contains(string(out), "cap_net_admin")
+}
+
+// shQuote экранирует путь для sh -c "...".
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
