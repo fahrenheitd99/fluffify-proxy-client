@@ -101,11 +101,6 @@ func waitForDaemon(client *ipc.Client, timeout time.Duration) bool {
 	return false
 }
 
-// Пул пунктов роутинга создаётся один раз и переиспользуется; дерево серверов
-// собирается динамически (fyne/systray v1.12 умеет Remove). Так меню
-// обновляется на ходу, без перезапуска трея.
-const maxRoutingSlots = 20
-
 // serverTitle — имя сервера в меню: человеческое имя или адрес.
 func serverTitle(p config.Profile) string {
 	title := uiutil.Display(p.Name)
@@ -230,22 +225,52 @@ func onReady(socketPath string) {
 		}
 	}()
 
-	// Профили роутинга — такой же пул: их список тоже может поменяться в TUI.
-	selectRoutingIdxCh := make(chan int, 4)
-	routeSlots := make([]*systray.MenuItem, maxRoutingSlots)
-	routeTitles := make([]string, maxRoutingSlots)
-	routeChecked := make([]bool, maxRoutingSlots)
-	routeShown := make([]bool, maxRoutingSlots)
-	for i := range routeSlots {
-		item := mRouting.AddSubMenuItemCheckbox("—", "", false)
-		item.Hide()
-		item.Disable()
-		routeSlots[i] = item
-		go func(idx int, item *systray.MenuItem) {
-			for range item.ClickedCh {
-				selectRoutingIdxCh <- idx
+	// Профили роутинга — динамическое подменю, как серверы: пул скрытых
+	// слотов на Windows рисовал пустые строки с прочерком, а fyne/systray
+	// v1.12 умеет Remove.
+	selectRoutingProfCh := make(chan string, 4)
+	type routingItem struct {
+		item *systray.MenuItem
+		id   string
+	}
+	var (
+		routingItems   []routingItem
+		routingListSig string
+		checkedRouting string
+	)
+	routingSig := func(store *config.Store) string {
+		var b strings.Builder
+		for i := range store.Routing.Profiles {
+			rp := store.Routing.Profiles[i]
+			name := uiutil.Display(rp.Name)
+			if strings.TrimSpace(name) == "" {
+				name = rp.ID
 			}
-		}(i, item)
+			fmt.Fprintf(&b, "%s:%s;", rp.ID, name)
+		}
+		return b.String()
+	}
+	rebuildRouting := func(store *config.Store) {
+		for _, ri := range routingItems {
+			ri.item.Remove()
+		}
+		routingItems = nil
+		for i := range store.Routing.Profiles {
+			rp := store.Routing.Profiles[i]
+			title := uiutil.Display(rp.Name)
+			if strings.TrimSpace(title) == "" {
+				title = rp.ID
+			}
+			item := mRouting.AddSubMenuItemCheckbox(
+				title, fmt.Sprintf("%d правил", len(rp.Rules)), false)
+			routingItems = append(routingItems, routingItem{item: item, id: rp.ID})
+			go func(id string, ch <-chan struct{}) {
+				for range ch {
+					selectRoutingProfCh <- id
+				}
+			}(rp.ID, item.ClickedCh)
+		}
+		checkedRouting = ""
 	}
 
 	systray.AddSeparator()
@@ -318,33 +343,28 @@ func onReady(socketPath string) {
 			setCheckbox(mModeTUN, &modeTUNChecked, store.Settings.Mode == config.ModeTUN)
 			setCheckbox(mModeProxy, &modeProxyChecked, store.Settings.Mode != config.ModeTUN)
 
-			setCheckbox(mRoutingOff, &routingOffChecked, !store.Routing.Enabled)
-			for i, item := range routeSlots {
-				if i >= len(store.Routing.Profiles) {
-					if routeTitles[i] != "" {
-						routeTitles[i] = ""
-						item.SetTitle("—")
-					}
-					if routeShown[i] {
-						routeShown[i] = false
-						item.Disable()
-						item.Hide()
-					}
-					continue
-				}
-				title := uiutil.Display(store.Routing.Profiles[i].Name)
-				if routeTitles[i] != title {
-					routeTitles[i] = title
-					item.SetTitle(title)
-				}
-				if !routeShown[i] {
-					routeShown[i] = true
-					item.Enable()
-					item.Show()
-				}
-				want := store.Routing.Enabled && store.Routing.Profiles[i].ID == store.Routing.ActiveProfileID
-				setCheckbox(item, &routeChecked[i], want)
+			// Роутинг: пересборка только при изменении списка профилей,
+			// иначе — только галочка активного профиля.
+			if sig := routingSig(store); sig != routingListSig {
+				routingListSig = sig
+				rebuildRouting(store)
 			}
+			wantRouting := ""
+			if store.Routing.Enabled {
+				wantRouting = store.Routing.ActiveProfileID
+			}
+			if wantRouting != checkedRouting {
+				for _, ri := range routingItems {
+					switch ri.id {
+					case checkedRouting:
+						ri.item.Uncheck()
+					case wantRouting:
+						ri.item.Check()
+					}
+				}
+				checkedRouting = wantRouting
+			}
+			setCheckbox(mRoutingOff, &routingOffChecked, !store.Routing.Enabled)
 			// Серверы: пересобираем дерево только при изменении списка
 			// (добавили ноду или подписку в TUI); в остальных тиках — только
 			// галочка активного сервера, без перерисовки всего меню.
@@ -604,10 +624,16 @@ func onReady(socketPath string) {
 			case rpID := <-selectRoutingCh:
 				setRouting(rpID)
 
-			case slot := <-selectRoutingIdxCh:
-				if store, loadErr := config.Load(); loadErr == nil &&
-					slot >= 0 && slot < len(store.Routing.Profiles) {
-					setRouting(store.Routing.Profiles[slot].ID)
+			case rpID := <-selectRoutingProfCh:
+				// Профиль роутинга могли удалить/переименовать в TUI, пока
+				// трей работал — проверяем по ID из свежего store.
+				if store, loadErr := config.Load(); loadErr == nil {
+					for i := range store.Routing.Profiles {
+						if store.Routing.Profiles[i].ID == rpID {
+							setRouting(rpID)
+							break
+						}
+					}
 				}
 
 			case <-mOpen.ClickedCh:
