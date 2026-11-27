@@ -67,7 +67,7 @@ func OptionsFromStore(store *config.Store) Options {
 		TUN:            store.Settings.Mode == config.ModeTUN,
 		TUNName:        store.Settings.TUNInterface,
 		TUNMTU:         store.Settings.TUNMTU,
-		TUNAutoDNS:     store.Settings.TUNAutoDNS,
+		TUNAutoDNS:     store.Settings.TUNAutoDNSValue(),
 		TUNIPv6:        store.Settings.TUNIPv6Value(),
 		RoutingEnabled: store.Routing.Enabled,
 		RoutingProfile: store.ActiveRoutingProfile(),
@@ -453,10 +453,15 @@ func buildTUNSettings(opts Options) map[string]any {
 
 // ensureTUNDNS добавляет минимальный блок dns, dns-outbound и перехват порта 53 с TUN,
 // чтобы Xray не отклонял autoSystemDnsToGateway при старте.
+// Серверы — DoH: шифрованные запросы даже в ветке direct; IP-адреса
+// (1.1.1.1, 8.8.8.8) — без bootstrap-цикла резолва доменов.
 func ensureTUNDNS(doc map[string]any, tunTag string) {
 	if _, hasDNS := doc["dns"]; !hasDNS {
 		doc["dns"] = map[string]any{
-			"servers": []string{"1.1.1.1", "8.8.8.8"},
+			"servers": []string{
+				"https://1.1.1.1/dns-query",
+				"https://8.8.8.8/dns-query",
+			},
 		}
 	}
 

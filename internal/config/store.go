@@ -91,7 +91,7 @@ type Settings struct {
 	AutoConnect  bool   `json:"auto_connect"`
 	TUNInterface string `json:"tun_interface"`
 	TUNMTU       int    `json:"tun_mtu"`
-	TUNAutoDNS   bool   `json:"tun_auto_dns"`
+	TUNAutoDNS   *bool  `json:"tun_auto_dns,omitempty"`
 	TUNIPv6      *bool  `json:"tun_ipv6"`
 	Theme        string `json:"theme"`
 	AccentColor  string `json:"accent_color"`
@@ -114,6 +114,17 @@ func (s *Settings) TUNIPv6Value() bool {
 
 func (s *Settings) SetTUNIPv6(v bool) {
 	s.TUNIPv6 = &v
+}
+
+// TUNAutoDNSValue — настройка «DNS в TUN»: по умолчанию включена — перехват
+// системного DNS на gateway TUN закрывает утечки DNS-запросов мимо туннеля.
+// Явное значение из store.json приоритетнее.
+func (s *Settings) TUNAutoDNSValue() bool {
+	return s.TUNAutoDNS == nil || *s.TUNAutoDNS
+}
+
+func (s *Settings) SetTUNAutoDNS(v bool) {
+	s.TUNAutoDNS = &v
 }
 
 func (s *Settings) GetHTTPPort() int {
