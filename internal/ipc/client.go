@@ -212,7 +212,7 @@ func (c *Client) DevCheck() (*DevCheckResponse, error) {
 
 func wrapConnErr(err error) error {
 	if IsDaemonDown(err) {
-		return errors.New("демон не запущен (выполни в отдельном окне: xray-tui daemon)")
+		return errors.New("демон не запущен (" + daemonHint() + ")")
 	}
 	return err
 }

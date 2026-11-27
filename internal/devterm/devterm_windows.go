@@ -3,21 +3,29 @@
 package devterm
 
 import (
-	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
 )
 
-// Terminal открывает новое консольное окно с командой. tail на Windows
-// нет — файлы смотрим через PowerShell Get-Content -Wait; окно остаётся
-// открытым (-NoExit), пользователь закрывает сам.
+// createNewConsole — CREATE_NEW_CONSOLE: PowerShell открывается в
+// собственном окне консоли. Прямой запуск вместо «cmd /c start …
+// cmd /k powershell "…"»: вложенные кавычки cmd.exe ломали команду
+// (окно мелькало и мгновенно закрывалось), а чужое окно cmd не нужно.
+const createNewConsole = 0x00000010
+
+// Terminal открывает новое окно PowerShell с командой. tail на Windows
+// нет — файлы смотрим через Get-Content -Wait; окно остаётся открытым
+// (-NoExit), пользователь закрывает сам.
 func Terminal(command string, keepOpen bool) error {
 	psCmd := strings.ReplaceAll(command, "'", "''")
 	if keepOpen {
 		psCmd += "; ''; Read-Host 'Press ENTER to close' | Out-Null"
 	}
-	inner := fmt.Sprintf(`powershell -NoExit -ExecutionPolicy Bypass -Command "%s"`, psCmd)
-	return exec.Command("cmd", "/c", "start", "Fluffify", "cmd", "/k", inner).Start()
+	cmd := exec.Command("powershell", "-NoProfile", "-NoExit",
+		"-ExecutionPolicy", "Bypass", "-Command", psCmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewConsole}
+	return cmd.Start()
 }
 
 // ViewFile открывает файл в ассоциированном приложении.

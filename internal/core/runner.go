@@ -49,6 +49,7 @@ func (r *Runner) Start(configJSON []byte, assetDir string) error {
 	}
 
 	cmd := exec.Command(r.binPath, "run", "-c", "stdin:")
+	osutil.HideChildConsole(cmd)
 	cmd.Stdin = bytes.NewReader(configJSON)
 	if assetDir == "" {
 		assetDir = osutil.SiblingAssetDir(r.binPath)

@@ -135,16 +135,7 @@ func (m model) runDevAction(idx int) (tea.Model, tea.Cmd) {
 		return m, devTunnelCheckCmd(m.client)
 
 	case 4: // Статус ядра
-		st, err := m.client.DevStatus()
-		if err != nil {
-			m.notice = "Демон недоступен: " + err.Error()
-			m.noticeErr = true
-			return m, nil
-		}
-		m.devStatus = st
-		m.notice = devStatusLine(st)
-		m.noticeErr = false
-		return m, nil
+		return m, devStatusReportCmd(m.client)
 
 	case 5: // Рестарт ядра
 		return m.reconnectIfRunning("Ядро перезапускается")
@@ -217,6 +208,16 @@ func shellQuoteArg(s string) string {
 }
 
 // --- Команды (tea.Cmd) ---
+
+// devStatusReportCmd — как devStatusCmd, но просит обработчик показать
+// результат в статусной строке (пункт «Статус ядра»). Запрос идёт
+// асинхронно: TUI не замирает на время IPC-вызова.
+func devStatusReportCmd(client *ipc.Client) tea.Cmd {
+	return func() tea.Msg {
+		st, err := client.DevStatus()
+		return devStatusMsg{st: st, err: err, report: true}
+	}
+}
 
 func devStatusCmd(client *ipc.Client) tea.Cmd {
 	return func() tea.Msg {
@@ -292,7 +293,9 @@ func maskSensitive(s string) string {
 
 // runCmd выполняет команду и возвращает её вывод (или «недоступно»).
 func runCmd(name string, args ...string) string {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	cmd := exec.Command(name, args...)
+	osutil.HideChildConsole(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Sprintf("%s: недоступно (%v)\n", name, err)
 	}

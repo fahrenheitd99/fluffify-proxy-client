@@ -32,3 +32,8 @@ func SecureSocket(path string) error {
 func IsDaemonDown(err error) bool {
 	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
+
+// daemonHint — что делать при недоступном демоне, в терминах платформы.
+func daemonHint() string {
+	return "выполни в отдельном окне: xray-tui daemon"
+}

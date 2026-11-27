@@ -583,7 +583,9 @@ func (d *Daemon) xrayVersion() string {
 	}
 	d.mu.Unlock()
 
-	out, err := exec.Command(d.xrayBin, "version").CombinedOutput()
+	verCmd := exec.Command(d.xrayBin, "version")
+	osutil.HideChildConsole(verCmd)
+	out, err := verCmd.CombinedOutput()
 	v := "unknown"
 	if err == nil {
 		if line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]; line != "" {

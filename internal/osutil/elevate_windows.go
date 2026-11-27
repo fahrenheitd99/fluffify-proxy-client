@@ -102,6 +102,7 @@ func relaunchViaPowerShell(exe string, args []string) error {
 		strings.ReplaceAll(exe, "'", "''"), strings.Join(psArgs, ","))
 
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	HideChildConsole(cmd)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Run(); err != nil {

@@ -34,3 +34,8 @@ func SecureSocket(string) error {
 func IsDaemonDown(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
 }
+
+// daemonHint — что делать при недоступном демоне, в терминах платформы.
+func daemonHint() string {
+	return "перезапусти Fluffify — демон стартует автоматически"
+}

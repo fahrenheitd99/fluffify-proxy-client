@@ -104,8 +104,9 @@ type subSyncDoneMsg struct {
 type elevateDoneMsg struct{ err error }
 
 type devStatusMsg struct {
-	st  *ipc.DevStatusResponse
-	err error
+	st     *ipc.DevStatusResponse
+	err    error
+	report bool // показать результат в статусной строке (пункт «Статус ядра»)
 }
 
 // devFileDoneMsg — результат команды, сохранившей файл отчёта; открывается
@@ -388,6 +389,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.devStatus = msg.st
+		if msg.report && msg.st != nil {
+			m.notice = devStatusLine(msg.st)
+			m.noticeErr = false
+		}
 		return m, nil
 
 	case tunProbeMsg:

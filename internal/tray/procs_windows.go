@@ -22,6 +22,8 @@ func terminateSiblingProcs() {
 	if name == "" || name == "." {
 		name = osutil.SelfName()
 	}
-	_ = exec.Command("taskkill", "/F", "/IM", name,
-		"/FI", "PID ne "+strconv.Itoa(os.Getpid())).Run()
+	kill := exec.Command("taskkill", "/F", "/IM", name,
+		"/FI", "PID ne "+strconv.Itoa(os.Getpid()))
+	osutil.HideChildConsole(kill)
+	_ = kill.Run()
 }
