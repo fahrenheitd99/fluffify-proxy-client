@@ -1,0 +1,35 @@
+// Fluffify: управление демоном fluffify-daemon@<user> и его перехватом DNS
+// без пароля.
+//
+// 1) Демон стартует по требованию из приложения (TUI/трей) через
+//    `systemctl start fluffify-daemon@<user>`. Дефолт polkit для
+//    manage-units — auth_admin_keep, то есть пароль при каждом старте.
+//    Демон работает с User=%i и ограниченным набором кап (см.
+//    fluffify-daemon@.service), поэтому разрешение не даёт доступа к
+//    произвольным юнитам.
+//
+// 2) Режим «DNS в TUN»: ядро Xray при autoSystemDnsToGateway меняет DNS
+//    интерфейса через systemd-resolved (DBus), и каждый вызов требует
+//    auth_admin_keep — hence пароли «set DNS servers / set domains /
+//    set default route» при включении и «reset name resolution settings»
+//    при выключении. Разрешаем ровно эти четыре действия (полный список
+//    resolve1-действий остаётся под системной политикой) для пользователей
+//    wheel в активной локальной сессии.
+polkit.addRule(function(action, subject) {
+    if (!subject.local || !subject.active || !subject.isInGroup("wheel")) {
+        return;
+    }
+
+    if (action.id === "org.freedesktop.systemd1.manage-units" &&
+        (action.lookup("unit") || "").startsWith("fluffify-daemon@")) {
+        return polkit.Result.YES;
+    }
+
+    switch (action.id) {
+        case "org.freedesktop.resolve1.set-dns-servers":
+        case "org.freedesktop.resolve1.set-domains":
+        case "org.freedesktop.resolve1.set-default-route":
+        case "org.freedesktop.resolve1.revert":
+            return polkit.Result.YES;
+    }
+});

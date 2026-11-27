@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"xray-tui/internal/autostart"
 	"xray-tui/internal/osutil"
 )
 
@@ -36,7 +37,10 @@ func runTUNSetup() error {
 			"       sudo modprobe tun\n"+
 			"       echo tun | sudo tee /etc/modules-load.d/tun.conf")
 	}
-	if !xrayHasFileCaps(xrayPath) {
+	if !autostart.SystemDaemonUnitAvailable() && !xrayHasFileCaps(xrayPath) {
+		// Без пакетного system-юнита капы можно выдать только setcap'ом.
+		// С юнитом права даёт сам systemd (AmbientCapabilities) — setcap
+		// не требуется и не нужен.
 		problems = append(problems, "2) выдать права бинарнику ядра:\n"+
 			"       sudo setcap cap_net_admin,cap_net_raw+ep "+xrayPath)
 	}

@@ -71,4 +71,10 @@ package() {
 
   install -Dm644 packaging/fluffify.desktop "$pkgdir/usr/share/applications/fluffify.desktop"
   install -Dm644 packaging/xray-tui.service "$pkgdir/usr/lib/systemd/user/xray-tui.service"
+
+  # System-юнит демона: TUN и перехват DNS без паролей и setcap — капы
+  # выдаёт сам systemd (AmbientCapabilities). Управление юнитом из
+  # приложения (start/stop по требованию) разрешает polkit-правило.
+  install -Dm644 packaging/fluffify-daemon@.service "$pkgdir/usr/lib/systemd/system/fluffify-daemon@.service"
+  install -Dm644 packaging/50-fluffify-daemon.rules "$pkgdir/usr/share/polkit-1/rules.d/50-fluffify-daemon.rules"
 }

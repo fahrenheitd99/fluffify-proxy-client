@@ -1,0 +1,23 @@
+[Unit]
+Description=Fluffify xray-core daemon (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+# Точный минимум прав: TUN-интерфейс (CAP_NET_ADMIN) и raw-сокеты для
+# ICMP-пинга (CAP_NET_RAW). setcap на бинарнике ядра при этом не нужен.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# Изнутри демона права поднять нельзя (suid/sgid недоступны).
+NoNewPrivileges=yes
+# Сокет IPC живёт в $XDG_RUNTIME_DIR/xray-tui/daemon.sock — тот же путь,
+# что ищут TUI/трей юзера. Каталог /run/user/%i создаёт logind при входе,
+# поэтому юнит стартует по требованию из приложения (уже после логина).
+# Включение в автозагрузку до логина бессмысленно: каталога ещё нет и
+# демон уйдёт в рестарт-луп до первого входа пользователя.
+Environment=XDG_RUNTIME_DIR=/run/user/%i
+ExecStart=/usr/bin/xray-tui daemon
+Restart=on-failure
+RestartSec=3
