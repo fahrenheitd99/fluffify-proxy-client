@@ -319,7 +319,7 @@ func (m model) handleMouseSubs(relY, bodyH int, btn tea.MouseButton, isDouble bo
 func (m model) handleMouseSettings(_, relY, bodyH int, btn tea.MouseButton, isDouble bool) (tea.Model, tea.Cmd) {
 	const (
 		xrayLinesCount = 14 // 0:верх, 1:заголовок, 2..12:пункты 0..10, 13:низ
-		totalLines     = 26 // 14:верх, 15:заголовок, 16..24:пункты 11..19, 25:низ
+		totalLines     = 27 // 14:верх, 15:заголовок, 16..25:пункты 11..20, 26:низ
 	)
 
 	var selectedLine int
@@ -347,7 +347,7 @@ func (m model) handleMouseSettings(_, relY, bodyH int, btn tea.MouseButton, isDo
 	switch {
 	case absY >= 2 && absY <= 12:
 		target = absY - 2
-	case absY >= 16 && absY <= 24:
+	case absY >= 16 && absY <= 25:
 		target = 11 + (absY - 16)
 	default:
 		return m, nil

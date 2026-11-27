@@ -447,6 +447,18 @@ func (m model) renderSettings(w, h int) string {
 		authVal = clipLine(m.store.Settings.ProxyUser, 10) + ":***"
 	}
 
+	// UA и HWID в списке не показываем в открытом виде — только блюр
+	// шрифтом Брайля. Текущее значение видно лишь в форме редактирования.
+	const blurred = "⠿⠿⠿⠿⠿⠿⠿⠿⠿⠿"
+	hwidVal := ""
+	if strings.TrimSpace(m.store.Settings.HWID) != "" {
+		hwidVal = blurred
+	}
+	uaVal := ""
+	if strings.TrimSpace(m.store.Settings.DefaultUA) != "" {
+		uaVal = blurred
+	}
+
 	xrayRows := []string{
 		renderSettingRow("Режим работы", modeLabel(m.store.Settings.Mode), m.settingsCursor == 0, innerW),
 		renderSettingRow("Тип пинга", pingModeLabel(m.store.Settings.PingMode), m.settingsCursor == 1, innerW),
@@ -468,8 +480,8 @@ func (m model) renderSettings(w, h int) string {
 		renderSettingRow("Автоподключение", onOffLabel(m.store.Settings.AutoConnect), m.settingsCursor == 14, innerW),
 		renderSettingRow("Тема оформления", themeLabel(m.store.Settings.Theme), m.settingsCursor == 15, innerW),
 		renderSettingRow("Акцентный цвет", accentLabel(m.store.Settings.AccentColor), m.settingsCursor == 16, innerW),
-		renderSettingRow("HWID", clipLine(m.store.Settings.HWID, 14), m.settingsCursor == 17, innerW),
-		renderSettingRow("User-Agent", clipLine(m.store.Settings.DefaultUA, 16), m.settingsCursor == 18, innerW),
+		renderSettingRow("HWID", hwidVal, m.settingsCursor == 17, innerW),
+		renderSettingRow("User-Agent", uaVal, m.settingsCursor == 18, innerW),
 		renderSettingRow("Интерфейс", uiModeLabel(m.store.Settings.UIMode), m.settingsCursor == 19, innerW),
 		renderSettingRow("О приложении / лицензии", "открыть →", m.settingsCursor == 20, innerW),
 	}
