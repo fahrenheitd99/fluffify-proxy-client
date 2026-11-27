@@ -101,33 +101,18 @@ func waitForDaemon(client *ipc.Client, timeout time.Duration) bool {
 	return false
 }
 
-// Пункты меню создаются один раз и переиспользуются: fyne/systray не даёт
-// надёжно добавлять их на ходу, а так список обновляется без перезапуска трея.
-const (
-	maxServerSlots  = 40
-	maxRoutingSlots = 20
-)
+// Пул пунктов роутинга создаётся один раз и переиспользуется; дерево серверов
+// собирается динамически (fyne/systray v1.12 умеет Remove). Так меню
+// обновляется на ходу, без перезапуска трея.
+const maxRoutingSlots = 20
 
-// profilesForMenu задаёт порядок серверов в меню: локальные ноды, затем ноды
-// каждой подписки. syncUI и обработчик клика используют его одинаково.
-func profilesForMenu(store *config.Store) []config.Profile {
-	if store == nil {
-		return nil
+// serverTitle — имя сервера в меню: человеческое имя или адрес.
+func serverTitle(p config.Profile) string {
+	title := uiutil.Display(p.Name)
+	if strings.TrimSpace(title) == "" {
+		title = p.Address
 	}
-	out := make([]config.Profile, 0, len(store.Profiles))
-	for _, p := range store.Profiles {
-		if p.SubID == "" {
-			out = append(out, p)
-		}
-	}
-	for _, sub := range store.Subscriptions {
-		for _, p := range store.Profiles {
-			if p.SubID == sub.ID {
-				out = append(out, p)
-			}
-		}
-	}
-	return out
+	return title
 }
 
 func onReady(socketPath string) {
@@ -152,26 +137,87 @@ func onReady(socketPath string) {
 	mReconnect := systray.AddMenuItem("Переподключить", "Перезапустить Xray с текущим конфигом")
 
 	mServers := systray.AddMenuItem("Серверы", "Выбрать и подключить ноду")
-	// Серверы. fyne/systray не позволяет надёжно добавлять пункты на ходу,
-	// поэтому создаём пул и переиспользуем его: названия, видимость и отметку
-	// активного сервера обновляет syncUI. Порядок пунктов = profilesForMenu.
-	selectProfSlotCh := make(chan int, 4)
-	serverSlots := make([]*systray.MenuItem, maxServerSlots)
-	serverTitles := make([]string, maxServerSlots)
-	serverChecked := make([]bool, maxServerSlots)
-	for i := range serverSlots {
-		item := mServers.AddSubMenuItemCheckbox("—", "", false)
-		item.Hide()
-		item.Disable()
-		serverSlots[i] = item
-		go func(idx int, item *systray.MenuItem) {
-			for range item.ClickedCh {
-				selectProfSlotCh <- idx
-			}
-		}(i, item)
+	// Серверы — живое дерево «подписка → её серверы» (плюс группа своих
+	// ключей). fyne/systray v1.12 умеет Remove, поэтому список не ограничен
+	// пулом слотов: при изменении подписок/серверов подменю пересобирается,
+	// а в остальное время обновляется только галочка активного сервера.
+	selectProfCh := make(chan string, 4)
+	type serverItem struct {
+		item   *systray.MenuItem
+		profID string // "" — пункт-группа (подписка), клики не обрабатываются
+		name   string // отображаемое имя сервера (для галочки активного)
 	}
+	var (
+		serverItems []serverItem
+		serverSig   string
+		checkedProf string // profID с галочкой ("" — ни один)
+	)
 	mNoServers := mServers.AddSubMenuItem("Нет серверов — добавь в Fluffify", "")
 	mNoServers.Disable()
+
+	// serversSig — структурная подпись списка: имена подписок и серверов.
+	// Пересобираем меню только когда она меняется — иначе трей на Windows
+	// перерисовывал бы пункты на каждый тик и лагал.
+	serversSig := func(store *config.Store) string {
+		var b strings.Builder
+		for _, sub := range store.Subscriptions {
+			fmt.Fprintf(&b, "s:%s:%s;", sub.ID, uiutil.Display(sub.Name))
+		}
+		for _, p := range store.Profiles {
+			fmt.Fprintf(&b, "p:%s:%s:%s;", p.SubID, p.ID, serverTitle(p))
+		}
+		return b.String()
+	}
+
+	rebuildServers := func(store *config.Store) {
+		for _, si := range serverItems {
+			si.item.Remove()
+		}
+		serverItems = nil
+
+		addGroup := func(title string, profiles []config.Profile) {
+			if len(profiles) == 0 {
+				return
+			}
+			parent := mServers.AddSubMenuItem(
+				fmt.Sprintf("%s (%d)", title, len(profiles)), "")
+			serverItems = append(serverItems, serverItem{item: parent})
+			for _, p := range profiles {
+				title := serverTitle(p)
+				item := parent.AddSubMenuItemCheckbox(title, "", false)
+				serverItems = append(serverItems, serverItem{item: item, profID: p.ID, name: title})
+				go func(id string, ch <-chan struct{}) {
+					for range ch {
+						selectProfCh <- id
+					}
+				}(p.ID, item.ClickedCh)
+			}
+		}
+
+		var locals []config.Profile
+		for _, p := range store.Profiles {
+			if p.SubID == "" {
+				locals = append(locals, p)
+			}
+		}
+		addGroup("Свои серверы", locals)
+		for _, sub := range store.Subscriptions {
+			var ps []config.Profile
+			for _, p := range store.Profiles {
+				if p.SubID == sub.ID {
+					ps = append(ps, p)
+				}
+			}
+			addGroup(uiutil.Display(sub.Name), ps)
+		}
+
+		if len(serverItems) == 0 {
+			mNoServers.Show()
+		} else {
+			mNoServers.Hide()
+		}
+		checkedProf = ""
+	}
 
 	// Подменю выбора профиля правил роутинга
 	mRouting := systray.AddMenuItem("Роутинг", "Выбрать профиль правил роутинга")
@@ -189,6 +235,7 @@ func onReady(socketPath string) {
 	routeSlots := make([]*systray.MenuItem, maxRoutingSlots)
 	routeTitles := make([]string, maxRoutingSlots)
 	routeChecked := make([]bool, maxRoutingSlots)
+	routeShown := make([]bool, maxRoutingSlots)
 	for i := range routeSlots {
 		item := mRouting.AddSubMenuItemCheckbox("—", "", false)
 		item.Hide()
@@ -278,8 +325,11 @@ func onReady(socketPath string) {
 						routeTitles[i] = ""
 						item.SetTitle("—")
 					}
-					item.Disable()
-					item.Hide()
+					if routeShown[i] {
+						routeShown[i] = false
+						item.Disable()
+						item.Hide()
+					}
 					continue
 				}
 				title := uiutil.Display(store.Routing.Profiles[i].Name)
@@ -287,47 +337,49 @@ func onReady(socketPath string) {
 					routeTitles[i] = title
 					item.SetTitle(title)
 				}
-				item.Enable()
-				item.Show()
+				if !routeShown[i] {
+					routeShown[i] = true
+					item.Enable()
+					item.Show()
+				}
 				want := store.Routing.Enabled && store.Routing.Profiles[i].ID == store.Routing.ActiveProfileID
 				setCheckbox(item, &routeChecked[i], want)
 			}
-			// Пункты серверов обновляем на ходу: после добавления нод в TUI меню
-			// перечитывается без перезапуска трея.
-			list := profilesForMenu(store)
-			if len(list) == 0 {
-				mNoServers.Enable()
-			} else {
-				mNoServers.Disable()
+			// Серверы: пересобираем дерево только при изменении списка
+			// (добавили ноду или подписку в TUI); в остальных тиках — только
+			// галочка активного сервера, без перерисовки всего меню.
+			if sig := serversSig(store); sig != serverSig {
+				serverSig = sig
+				rebuildServers(store)
 			}
-			for i, item := range serverSlots {
-				if i >= len(list) {
-					if serverTitles[i] != "" {
-						serverTitles[i] = ""
-						item.SetTitle("—")
-					}
-					item.Disable()
-					item.Hide()
+			wantProf := ""
+			for _, si := range serverItems {
+				if si.profID == "" {
 					continue
 				}
-				title := uiutil.Display(list[i].Name)
-				if strings.TrimSpace(title) == "" {
-					title = list[i].Address
-				}
-				if serverTitles[i] != title {
-					serverTitles[i] = title
-					item.SetTitle(title)
-				}
-				item.Enable()
-				item.Show()
-
-				want := false
 				if st != nil && st.Running {
-					want = list[i].Name == st.Profile
-				} else if activeID != "" {
-					want = list[i].ID == activeID
+					if si.name == st.Profile {
+						wantProf = si.profID
+						break
+					}
+				} else if si.profID == activeID {
+					wantProf = si.profID
+					break
 				}
-				setCheckbox(item, &serverChecked[i], want)
+			}
+			if wantProf != checkedProf {
+				for _, si := range serverItems {
+					if si.profID == "" {
+						continue
+					}
+					switch si.profID {
+					case checkedProf:
+						si.item.Uncheck()
+					case wantProf:
+						si.item.Check()
+					}
+				}
+				checkedProf = wantProf
 			}
 		}
 
@@ -535,13 +587,16 @@ func onReady(socketPath string) {
 				connectProfile(nil)
 				syncUI()
 
-			case slot := <-selectProfSlotCh:
+			case profID := <-selectProfCh:
 				// Список читаем заново: сервера могли добавить в TUI,
 				// пока трей работал.
 				if store, loadErr := config.Load(); loadErr == nil {
-					if list := profilesForMenu(store); slot >= 0 && slot < len(list) {
-						prof := list[slot]
-						connectProfile(&prof)
+					for i := range store.Profiles {
+						if store.Profiles[i].ID == profID {
+							prof := store.Profiles[i]
+							connectProfile(&prof)
+							break
+						}
 					}
 				}
 				syncUI()
