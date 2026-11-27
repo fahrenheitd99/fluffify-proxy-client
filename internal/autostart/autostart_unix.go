@@ -40,10 +40,12 @@ func Set(enable bool) error {
 		}
 
 		// Юнит мог остаться от другой сборки (например, из старого каталога
-		// проекта): тогда systemd поднимал бы устаревший демон. Перезаписываем,
-		// если путь не совпадает с текущим бинарником.
+		// проекта) или от старой версии с неработающими AmbientCapabilities:
+		// тогда systemd поднимал бы устаревшего демона или падал с
+		// 218/CAPABILITIES. Перезаписываем в обоих случаях.
 		current, readErr := os.ReadFile(unitPath)
-		if readErr != nil || !unitMatchesExe(string(current), exe) {
+		if readErr != nil || !unitMatchesExe(string(current), exe) ||
+			strings.Contains(string(current), "AmbientCapabilities") {
 			if err := os.MkdirAll(unitDir, 0o755); err != nil {
 				return err
 			}
@@ -65,8 +67,9 @@ func Set(enable bool) error {
 }
 
 // unitContent — текст user-юнита, запускающего демон из указанного бинарника.
-// AmbientCapabilities даёт демону сетевые права: запущенный им child-процесс
-// xray наследует их и сам создаёт TUN-адаптер, не поднимаясь до root.
+// Без AmbientCapabilities: user-менеджер systemd не владеет CAP_NET_ADMIN,
+// юнит с такими правами не запускается вовсе (218/CAPABILITIES). Права на
+// TUN выдаёт tun-setup: setcap на бинарнике ядра xray.
 func unitContent(exe string) string {
 	return fmt.Sprintf(`[Unit]
 Description=Xray TUI Background Daemon
@@ -74,8 +77,6 @@ After=network-online.target
 
 [Service]
 Type=simple
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 ExecStart=%s daemon
 Restart=on-failure
 RestartSec=2
@@ -91,7 +92,12 @@ func unitMatchesExe(content, exe string) bool {
 }
 
 // Start поднимает демон через systemd. false — юнит не установлен или systemd нет.
+// Перед стартом перечитываем юниты: пакет мог обновить /usr/lib/systemd/user
+// (например, убрать неработающие AmbientCapabilities старой версии) — без
+// daemon-reload systemd продолжал бы рестарт-луп старого описания.
 func Start() bool {
+	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	_ = exec.Command("systemctl", "--user", "reset-failed", unitName).Run()
 	return exec.Command("systemctl", "--user", "start", unitName).Run() == nil
 }
 

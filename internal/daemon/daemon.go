@@ -312,8 +312,9 @@ func (d *Daemon) handleStart(w http.ResponseWriter, r *http.Request) {
 		errMsg := "xray завершился после старта"
 		if mode == "tun" && (strings.Contains(strings.ToLower(reason), "permission") ||
 			strings.Contains(strings.ToLower(reason), "not permitted") ||
+			strings.Contains(strings.ToLower(reason), "no such device") ||
 			strings.Contains(strings.ToLower(reason), "tun")) {
-			errMsg = "TUN не запустился — выполни: xray-tui tun-setup"
+			errMsg = "TUN не запустился — выполни: " + osutil.SelfName() + " tun-setup"
 		}
 		if reason != "" {
 			errMsg += ": " + reason

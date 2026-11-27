@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Демон запускает ядро xray child-процессом: через AmbientCapabilities юнита
-# ребёнок наследует сетевые права и создаёт TUN-адаптер без root.
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# Демон запускает ядро xray child-процессом. Прав на TUN у юнита нет:
+# user-менеджер systemd не владеет CAP_NET_ADMIN и юнит с
+# AmbientCapabilities не запускается вовсе (218/CAPABILITIES). Права выдаёт
+# tun-setup: setcap на самом бинарнике ядра xray.
 ExecStart=/usr/bin/xray-tui daemon
 Restart=on-failure
 RestartSec=3
